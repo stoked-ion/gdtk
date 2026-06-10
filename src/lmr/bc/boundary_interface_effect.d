@@ -92,7 +92,8 @@ BoundaryInterfaceEffect make_BIE_from_json(JSONValue jsonData, int blk_id, int b
         break;
     case "fixed_temperature":
         double Twall = getJSONdouble(jsonData, "Twall", 300.0);
-        newBIE = new BIE_FixedT(blk_id, boundary, Twall);
+        bool adiabatic_T_modes = getJSONbool(jsonData, "adiabatic_T_modes", false);
+        newBIE = new BIE_FixedT(blk_id, boundary, Twall, adiabatic_T_modes);
         break;
     case "fixed_composition":
         double[] massfAtWall = getJSONdoublearray(jsonData, "wall_massf_composition", [1.0,]);
@@ -790,16 +791,26 @@ class BIE_RotatingSurface : BoundaryInterfaceEffect {
 class BIE_FixedT : BoundaryInterfaceEffect {
 public:
     double Twall;
+    // With adiabatic_T_modes, the T_modes are left at the values copied from the
+    // interior cell (zero-gradient) rather than being pinned to Twall. This is the
+    // appropriate treatment for a free-electron energy mode at a sheath-bounded wall:
+    // the sheath potential barrier thermally insulates the electrons, so Te does not
+    // accommodate to the wall temperature and there is no electron heat conduction
+    // into the wall. (With Te pinned to a cold Twall and nonzero k_modes, the wall
+    // flux can drain the low-heat-capacity electron mode to negative energies.)
+    bool adiabatic_T_modes;
 
-    this(int id, int boundary, double Twall)
+    this(int id, int boundary, double Twall, bool adiabatic_T_modes=false)
     {
         super(id, boundary, "FixedT");
         this.Twall = Twall;
+        this.adiabatic_T_modes = adiabatic_T_modes;
     }
 
     override string toString() const
     {
-        return "FixedT(Twall=" ~ to!string(Twall) ~ ")";
+        return "FixedT(Twall=" ~ to!string(Twall) ~
+            ", adiabatic_T_modes=" ~ to!string(adiabatic_T_modes) ~ ")";
     }
 
     override void apply_for_interface_unstructured_grid(double t, int gtl, int ftl, FVInterface f)
@@ -808,7 +819,9 @@ public:
         BoundaryCondition bc = blk.bc[which_boundary];
 	f.fs.gas.T = Twall;
 	version(multi_T_gas) {
-	    foreach(ref elem; f.fs.gas.T_modes) { elem = Twall; }
+	    if (!adiabatic_T_modes) {
+	        foreach(ref elem; f.fs.gas.T_modes) { elem = Twall; }
+	    }
 	}
     }
 
@@ -818,7 +831,9 @@ public:
         foreach (i, f; bc.faces) {
             f.fs.gas.T = Twall;
             version(multi_T_gas) {
-                foreach(ref elem; f.fs.gas.T_modes) { elem = Twall; }
+                if (!adiabatic_T_modes) {
+                    foreach(ref elem; f.fs.gas.T_modes) { elem = Twall; }
+                }
             }
         }
     } // end apply_unstructured_grid()
@@ -829,7 +844,9 @@ public:
         BoundaryCondition bc = blk.bc[which_boundary];
 	f.fs.gas.T = Twall;
 	version(multi_T_gas) {
-	    foreach(ref elem; f.fs.gas.T_modes) { elem = Twall; }
+	    if (!adiabatic_T_modes) {
+	        foreach(ref elem; f.fs.gas.T_modes) { elem = Twall; }
+	    }
 	}
     }
 
@@ -842,7 +859,9 @@ public:
         foreach (i, f; bc.faces) {
             f.fs.gas.T = Twall;
             version(multi_T_gas) {
-                foreach(ref elem; f.fs.gas.T_modes) { elem = Twall; }
+                if (!adiabatic_T_modes) {
+                    foreach(ref elem; f.fs.gas.T_modes) { elem = Twall; }
+                }
             }
         }
     } // end apply_structured_grid()

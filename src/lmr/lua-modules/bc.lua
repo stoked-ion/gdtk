@@ -361,11 +361,16 @@ function RotatingSurface:tojson()
    return str
 end
 
-FixedT = BoundaryInterfaceEffect:new{Twall=nil}
+FixedT = BoundaryInterfaceEffect:new{Twall=nil, adiabatic_T_modes=false}
 FixedT.type = "fixed_temperature"
 function FixedT:tojson()
    local str = string.format('          {"type": "%s",', self.type)
-   str = str .. string.format(' "Twall": %.18e', self.Twall)
+   str = str .. string.format(' "Twall": %.18e,', self.Twall)
+   -- adiabatic_T_modes: leave T_modes at the (copied) cell values, i.e. zero-gradient,
+   -- instead of pinning them to Twall. Use for free-electron energy modes at
+   -- sheath-bounded walls: the sheath potential barrier thermally insulates the
+   -- electrons from the wall, so Te should not accommodate to the wall temperature.
+   str = str .. string.format(' "adiabatic_T_modes": %s', tostring(self.adiabatic_T_modes or false))
    str = str .. '}'
    return str
 end
@@ -859,7 +864,7 @@ function WallBC_NoSlip_FixedT0:new(o)
    flag = checkAllowedNames(o, {"Twall", "wall_function", "field_bc",
                                 "catalytic_type", "wall_massf_composition",
                                 "label", "group", "is_design_surface", "num_cntrl_pts",
-                                "user_post_diff_flux"})
+                                "user_post_diff_flux", "adiabatic_T_modes"})
    if not flag then
       error("Invalid name for item supplied to WallBC_NoSlip_FixedT0 constructor.", 2)
    end
@@ -868,7 +873,7 @@ function WallBC_NoSlip_FixedT0:new(o)
    o.is_wall_with_viscous_effects = true
    o.preReconAction = { InternalCopyThenReflect:new() }
    o.preSpatialDerivActionAtBndryFaces = { CopyCellData:new(), ZeroSlipWallVelocity:new(),
-					   FixedT:new{Twall=o.Twall}}
+					   FixedT:new{Twall=o.Twall, adiabatic_T_modes=o.adiabatic_T_modes}}
 
    if o.catalytic_type == "fixed_composition" then
       o.preSpatialDerivActionAtBndryFaces[#o.preSpatialDerivActionAtBndryFaces+1] =
@@ -911,7 +916,8 @@ function WallBC_NoSlip_FixedT1:new(o)
    o = o or {}
    flag = checkAllowedNames(o, {"Twall", "wall_function","field_bc",
                                 "catalytic_type", "wall_massf_composition",
-                                "label", "group", "is_design_surface", "num_cntrl_pts"})
+                                "label", "group", "is_design_surface", "num_cntrl_pts",
+                                "adiabatic_T_modes"})
    if not flag then
       error("Invalid name for item supplied to WallBC_NoSlip_FixedT1 constructor.", 2)
    end
@@ -920,7 +926,7 @@ function WallBC_NoSlip_FixedT1:new(o)
    o.is_wall_with_viscous_effects = true
    o.preReconAction = {}
    o.preSpatialDerivActionAtBndryFaces = { CopyCellData:new(), ZeroSlipWallVelocity:new(),
-					   FixedT:new{Twall=o.Twall}}
+					   FixedT:new{Twall=o.Twall, adiabatic_T_modes=o.adiabatic_T_modes}}
 
    if o.catalytic_type == "fixed_composition" then
       o.preSpatialDerivActionAtBndryFaces[#o.preSpatialDerivActionAtBndryFaces+1] =

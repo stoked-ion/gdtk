@@ -166,7 +166,46 @@ public:
         double T_ref = 1500.0; // degree K
         Q.mu = mu_ref * pow(Q.T/T_ref, 0.72);
         Q.k = Q.mu * _Cp / 0.667; // fixed Prandtl number
-        Q.k_modes[0] = 0.0;
+        Q.k_modes[0] = electron_thermal_conductivity(Q);
+    }
+    @nogc number electron_thermal_conductivity(ref const(GasState) Q) const
+    {
+        // Electron translational thermal conductivity for the vibroelectronic mode
+        // (previously hard-zero, i.e. no electron heat conduction at all).
+        // Kinetic-theory form
+        //     k_e = (5/2) n_e kB^2 Te / (m_e nu_e),
+        // equivalent to the Wiedemann-Franz relation k_e = (5/2)(kB/e)^2 sigma_e Te,
+        // using the electron-neutral (Frost/Phelps fit) and electron-ion (Coulomb)
+        // momentum-transfer collision frequencies that match those in
+        // kinetics/two_temperature_argon_kinetics.d and the lmr efield
+        // CoulombConductivity model. Computed in `number` arithmetic so that
+        // complex-step derivatives propagate through the viscous fluxes.
+        number n_e = Q.rho*Q.massf[Species.e_minus]/_mol_masses[Species.e_minus]*Avogadro_number;
+        if (n_e.re <= 1.0e10) {
+            // Effectively un-ionised: no electron heat conduction (and guard the
+            // n_e=0 case, where the Coulomb logarithm would produce 0*inf = NaN).
+            return to!number(0.0);
+        }
+        number n_n = Q.rho*Q.massf[Species.Ar]/_mol_masses[Species.Ar]*Avogadro_number;
+        number Te = Q.T_modes[0];
+        if (Te.re < 200.0) { Te = 200.0; }
+        if (Te.re > 500.0e3) { Te = 500.0e3; }
+        double m_e = _mol_masses[Species.e_minus]/Avogadro_number; // electron mass, kg
+        // electron-neutral momentum-transfer cross-section [m^2] (Frost/Phelps fit)
+        number Q_ea;
+        if (Te.re < 10.0e3) {
+            Q_ea = 0.39 + Te*(-0.551e-4 + 0.595e-8*Te);
+        } else {
+            Q_ea = -0.35 + 0.775e-4*Te;
+        }
+        Q_ea *= 1.0e-20;
+        // electron-ion Coulomb cross-section [m^2] (n_e in cm^-3 inside the log)
+        number Q_ei = 1.95e-10/(Te*Te)*log(1.53e8*Te*Te*Te/(n_e/1.0e6));
+        if (Q_ei.re < 0.0) { Q_ei = 0.0; }
+        number v_th = sqrt(8.0*Boltzmann_constant*Te/(PI*m_e)); // mean thermal speed
+        number nu = n_n*v_th*Q_ea + n_e*v_th*Q_ei; // collision frequency, 1/s
+        if (nu.re < 1.0e6) { nu = 1.0e6; }
+        return 2.5*n_e*Boltzmann_constant*Boltzmann_constant*Te/(m_e*nu);
     }
     override number dudT_const_v(in GasState Q) const
     {
@@ -273,4 +312,23 @@ unittest {
     gm.update_trans_coeffs(gd);
     assert(isClose(gd.mu, 22.912e-6, 1.0e-3));
     assert(isClose(gd.k, 0.0178625, 1.0e-6));
+    // Un-ionised gas carries no electron heat conduction.
+    assert(gd.k_modes[0] == 0.0);
+
+    // Electron thermal conduction for a partially-ionised state
+    // (conditions like the core of an MHD-accelerator channel).
+    gd.p = 16.0e3;
+    gd.T = 10.0e3;
+    gd.T_modes[0] = 14.0e3;
+    gd.massf[Species.Ar] = 0.91;
+    gd.massf[Species.Ar_plus] = 0.09;
+    gd.massf[Species.e_minus] = 0.0;
+    gm.balance_charge(gd);
+    gm.update_thermo_from_pT(gd);
+    gm.update_trans_coeffs(gd);
+    // Wiedemann-Franz sanity bracket: k_e = (5/2)(kB/e)^2 sigma Te with
+    // sigma ~ O(10^3) S/m here gives k_e of order 1 W/(m.K), far above the
+    // heavy-particle conductivity. The exact value depends on the collision
+    // cross-section fits; bracket it rather than pinning the fit constants.
+    assert(gd.k_modes[0] > 0.1 && gd.k_modes[0] < 10.0);
 }

@@ -39,6 +39,7 @@ configOptionsHidden = { -- hidden from user
    electric_field_gmres_iters = -1,
    electric_field_freeze_in_linear_solve = false,
    electric_field_start_step = 0,
+   electric_field_hall_effect = false,
    solve_electric_field = false,
    conductivity_model_name="none",
    electric_field_work = false,

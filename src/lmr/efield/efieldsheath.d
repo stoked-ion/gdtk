@@ -71,16 +71,25 @@ private:
 // small leak for conditioning. K [A/(m^2 V^1.5)] is the lumped space-charge coefficient
 // = (4/9) eps0 sqrt(2 q/m) / d_sheath^2 for the conducting carrier.
 class ChildLangmuirSheath : SheathModel {
-    this(double K, double leak) { this.K = K; this.leak = leak; }
+    this(double K, double leak, double dV_lin) { this.K = K; this.leak = leak; this.dV_lin = dV_lin; }
     final double current(double dV, ref const(GasState) gs, GasModel gm){
         double a = fabs(dV);
         return copysign(K*a*sqrt(a), dV) + leak*dV;
     }
     final double conductance(double dV, ref const(GasState) gs, GasModel gm){
-        return 1.5*K*sqrt(fabs(dV)) + leak;
+        // The true differential conductance 1.5*K*sqrt(|dV|) vanishes at dV = 0 --
+        // exactly where the FIRST field solve is seeded (the NaN guard linearizes
+        // about phi = Velectrode). With it zero, nothing anchors the potential level
+        // (the leak's ~1e-9 S row entries are the only gauge fixing), the system is
+        // effectively pure-Neumann singular, and any rhs imbalance drives the level
+        // to ~1e9 V and stalls the field GMRES. Floor the LINEARIZATION slope at its
+        // |dV| = dV_lin value: the converged physics is untouched (the Robin fixed
+        // point satisfies flux = S*J(dV) exactly, independent of the slope); only
+        // the Newton-style damping near zero bias changes.
+        return 1.5*K*sqrt(fmax(fabs(dV), dV_lin)) + leak;
     }
 private:
-    double K, leak;
+    double K, leak, dV_lin;
 }
 
 // Electron-saturation (collector) sheath: the electrode can draw at most the random
@@ -128,7 +137,10 @@ SheathModel create_sheath_model(string name, JSONValue j){
     case "diode":
         return new DiodeSheath(getJSONdouble(j, "Rsheath", 1.0), getJSONdouble(j, "Vfall", 0.0), leak);
     case "child-langmuir":
-        return new ChildLangmuirSheath(getJSONdouble(j, "K", 1.0e-3), leak);
+        // dV_lin [V]: bias below which the Robin linearization slope is floored
+        // (gauge anchoring for the first solve / zero-bias faces); see conductance().
+        return new ChildLangmuirSheath(getJSONdouble(j, "K", 1.0e-3), leak,
+                                       getJSONdouble(j, "dV_lin", 1.0));
     case "saturation":
         return new SaturationSheath(getJSONdouble(j, "Rsheath", 1.0), getJSONdouble(j, "Vfall", 0.0), leak);
     default:

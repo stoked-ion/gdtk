@@ -80,6 +80,25 @@ class ElectricField {
             gmres = new GMResFieldSolver();
         }
 
+        // Cells whose FD stencils use the one-sided ZNG derivative families
+        // (celltype != ZNG_interior). The Hall tensor terms are gated off on every
+        // face touching one of these cells: their tangential-gradient estimates
+        // differ from the interior R_* family at leading order, so a face shared
+        // between the two families assembles non-cancelling fluxes (see the
+        // conservation gate in solve_efield).
+        zng_layer.length = N;
+        zng_layer[] = false;
+        foreach(i, block; localFluidBlocks){
+            foreach(cell; block.cells){
+                foreach(face; cell.iface){
+                    if (face.is_on_boundary &&
+                        ((cast(ZeroNormalGradient) field_bcs[i][face.bc_id]) !is null)) {
+                        zng_layer[cell.id + block_offsets[i]] = true;
+                    }
+                }
+            }
+        }
+
         return;
     }
 
@@ -233,8 +252,11 @@ class ElectricField {
                     throw new Error(errMsg);
                 }
 
+                double Bz_app = GlobalConfig.applied_Bz;
+                bool hall_on = GlobalConfig.electric_field_hall_effect && (Bz_app != 0.0);
+
                 foreach(io, face; cell.iface){
-                    int iio = (io>1) ? to!int(io+1) : to!int(io); // -> [0,1,3,4] since 2 is 
+                    int iio = (io>1) ? to!int(io+1) : to!int(io); // -> [0,1,3,4] since 2 is
                     face.fs.gas.sigma = conductivity(face.fs.gas, face.pos, gmodel); // TODO: Redundant work.
                     double sign = cell.outsign[io];
                     double S = face.length.re;
@@ -247,10 +269,62 @@ class ElectricField {
                     double ehatx = dx[io]/emag;
                     double ehaty = dy[io]/emag;
 
+                    // Tensor (Hall) conductivity. With B = Bz z and Hall parameter
+                    // beta = e*Bz/(m_e*nu_e) (from the conductivity model), Ohm's law
+                    // J = sigma_t (-grad phi + uxB) has the 2x2 tensor
+                    //     sigma_t = sigma/(1+beta^2) [[1, -beta], [beta, 1]],
+                    // and the face current is J.n = m.(-grad phi + uxB) with the
+                    // sigma-weighted rotated normal m = sigma_t^T n:
+                    //     mx = sigma_P*nx + sigma_H*ny,  my = sigma_P*ny - sigma_H*nx,
+                    // sigma_P = sigma/(1+beta^2), sigma_H = sigma*beta/(1+beta^2).
+                    // beta = 0 recovers m = sigma*n (the scalar path) exactly. The
+                    // tangential-gradient information m needs is already carried by the
+                    // hybrid stencil, so the 5-band matrix structure is unchanged.
+                    // Block-to-block (shared) faces are physically interior and get the
+                    // rotation; true domain boundaries keep the scalar path -- their
+                    // current is set by the BC (sheath law / Dirichlet / ZNG insulator).
+                    bool hall_face = hall_on;
+                    if (face.is_on_boundary && !(field_bcs[blkid][face.bc_id].isShared)) hall_face = false;
+                    // Conservation gate: the tangential Hall flux is a discrete-curl term
+                    // whose column sums cancel only around closed, consistent stencil
+                    // loops; wherever the loop breaks (a stencil-family change at the
+                    // one-sided ZNG cells, the sheath-wall redirect, or any beta jump)
+                    // an O(sigma_H) net-current defect is left behind. With the break at
+                    // the ZNG corner cells -- where the ZGW/ZGE one-sided FD family and
+                    // the wall redirect compound -- the manufactured current reached
+                    // ~400 A/m on the X2-ABLE channel, pushing the floating level off by
+                    // +1.5 kV. Gating the Hall rotation (beta = 0, scalar sigma) on every
+                    // face touching a ZNG-layer cell relocates the break to plain interior
+                    // cells, which measures ~50x smaller in level error (-31 V first
+                    // solve, -2 V once the sheath Robin anchoring is iterated). The gate
+                    // must be symmetric -- both rows of a face must see the same beta --
+                    // hence the partner-cell lookup. Remote partners across block
+                    // boundaries are assumed interior: ZNG layers normally sit at domain
+                    // ends, not at block joins.
+                    if (hall_face && zng_layer[k]) hall_face = false;
+                    if (hall_face && !face.is_on_boundary) {
+                        auto pcell = (face.left_cell is cell) ? face.right_cell : face.left_cell;
+                        if (zng_layer[pcell.id + block_offsets[blkid]]) hall_face = false;
+                    }
+                    double beta = (hall_face) ? conductivity.hall_beta(face.fs.gas, gmodel, Bz_app) : 0.0;
+                    double obb = 1.0/(1.0 + beta*beta);
+                    double mxF = sigmaF*(nxF + beta*nyF)*obb;
+                    double myF = sigmaF*(nyF - beta*nxF)*obb;
+
                     // Hybrid method
                     double facx = nxF - ehatx*ehatx*nxF - ehatx*ehaty*nyF;
                     double facy = nyF - ehaty*ehatx*nxF - ehaty*ehaty*nyF;
                     double fac = (ehatx*nxF + ehaty*nyF)/emag;
+
+                    // sigma-folded (Hall-rotated) stencil factors. These replace the
+                    // products sigmaF*facx, sigmaF*facy, sigmaF*fac in the flux terms;
+                    // for beta = 0 they are exactly those products. The un-folded
+                    // facx/facy/fac remain for the *_direct_component BC calls, which
+                    // fold sigma internally.
+                    double mdote = ehatx*mxF + ehaty*myF;
+                    double sfacx = mxF - ehatx*mdote;
+                    double sfacy = myF - ehaty*mdote;
+                    double sfac  = mdote/emag;
 
                     // Finite difference stencil
                     //    double facx = nxF;
@@ -272,6 +346,9 @@ class ElectricField {
                             facx = nxF;
                             facy = nyF;
                             fac = 0.0;
+                            sfacx = sigmaF*nxF;
+                            sfacy = sigmaF*nyF;
+                            sfac = 0.0;
                         } else if (auto sheath = cast(SheathField) field_bc){
                             // Electrode sheath: the gas carries ~no current at the cold
                             // electrode face (face sigma ~ 0), so suppress its gas-conduction
@@ -281,45 +358,88 @@ class ElectricField {
                             facx = 0.0;
                             facy = 0.0;
                             fac = 0.0;
+                            sfacx = 0.0;
+                            sfacy = 0.0;
+                            sfac = 0.0;
                             double a_diag, b_rhs;
                             sheath.linearized_robin(face, cell.electric_potential.re, gmodel, a_diag, b_rhs);
                             A[k*nbands + 2] += a_diag;
                             b[k]            += b_rhs;
+                        } else if (field_bc.isShared) {
+                            // Block-to-block face: physically interior, so apply the same
+                            // (Hall-rotated) direct term as the interior branch. For beta=0
+                            // this equals the SharedField lhs_direct/other components.
+                            A[k*nbands + 2]  += -1.0*S*sfac;
+                            A[k*nbands + iio]+=  1.0*S*sfac;
                         } else {
                             A[k*nbands + 2]  += field_bc.lhs_direct_component(fac, face);
                             A[k*nbands + iio]+= field_bc.lhs_other_component(fac, face);
                             b[k]             -= field_bc.rhs_direct_component(sign, fac, face);
                         }
                     } else {
-                        A[k*nbands + 2] +=  -1.0*S*fac*sigmaF;
-                        A[k*nbands + iio]+=  1.0*S*fac*sigmaF;
+                        A[k*nbands + 2] +=  -1.0*S*sfac;
+                        A[k*nbands + iio]+=  1.0*S*sfac;
                     }
 
                     // PART TWO: The other part of the gradient comes from a finite difference stencil,
                     // which has components from all of the nearby cells, and cell k:
-                    A[k*nbands + 2] +=  S/D*sigmaF*(facx*(_Ix) + facy*(_Iy));
+                    A[k*nbands + 2] +=  S/D*(sfacx*(_Ix) + sfacy*(_Iy));
 
                     // Each jface makes a contribution to the flux through "face"
                     foreach(jo, jface; cell.iface){
                         int jjo = (jo>1) ? to!int(jo+1) : to!int(jo); // -> [0,1,3,4] since 2 is the entry for "cell"
                         if (jface.is_on_boundary) {
                             auto field_bc = field_bcs[blkid][jface.bc_id];
-                            A[k*nbands + jjo] += S*sigmaF*field_bc.lhs_stencil_component(D, facx, facy, fdx[jo], fdy[jo], jface);
-                            b[k]              -= S*sigmaF*field_bc.rhs_stencil_component(D, facx, facy, fdx[jo], fdy[jo], jface);
+                            if ((cast(SheathField) field_bc) !is null) {
+                                // The sheath wall supplies no phi data point (its stencil
+                                // components are zero) and the cell keeps the interior R_*
+                                // weights (see the celltype note above), so dropping this
+                                // term acts like a spurious phi=0 Dirichlet in the cell's
+                                // FD gradient: the estimate picks up ~phi_k/h of gauge-
+                                // dependent garbage. Dormant while sfacx=sfacy~0 (scalar
+                                // sigma, orthogonal grid), it is activated by the Hall
+                                // terms and wrecks the field near the electrodes.
+                                // Reconstruct the missing point by linear extrapolation
+                                // along the line to the opposite neighbour:
+                                //   phi_j ~= phi_k + t*(phi_opp - phi_k),
+                                //   t = (d_j . d_opp)/|d_opp|^2   (t < 0),
+                                // which restores exactness on constant AND linear fields.
+                                double w = S/D*(sfacx*fdx[jo] + sfacy*fdy[jo]);
+                                if (w != 0.0) {
+                                    size_t jopp = (jo+2)%4;
+                                    auto oface = cell.iface[jopp];
+                                    bool opp_ok = !oface.is_on_boundary
+                                        || field_bcs[blkid][oface.bc_id].isShared;
+                                    double t = 0.0; // fallback: mirror (constant-exact only)
+                                    if (opp_ok) {
+                                        double dopp2 = dx[jopp]*dx[jopp] + dy[jopp]*dy[jopp];
+                                        t = (dx[jo]*dx[jopp] + dy[jo]*dy[jopp])/dopp2;
+                                    }
+                                    int jjopp = (jopp>1) ? to!int(jopp+1) : to!int(jopp);
+                                    A[k*nbands + 2]     += (1.0-t)*w;
+                                    if (t != 0.0) A[k*nbands + jjopp] += t*w;
+                                }
+                            } else {
+                                // The *_stencil_component implementations are linear in
+                                // (facx, facy) and do not fold sigma internally, so passing
+                                // the sigma-folded factors replaces the external sigmaF.
+                                A[k*nbands + jjo] += S*field_bc.lhs_stencil_component(D, sfacx, sfacy, fdx[jo], fdy[jo], jface);
+                                b[k]              -= S*field_bc.rhs_stencil_component(D, sfacx, sfacy, fdx[jo], fdy[jo], jface);
+                            }
                         } else {
-                            A[k*nbands + jjo] += S/D*sigmaF*(facx*(fdx[jo])
-                                                           + facy*(fdy[jo]));
+                            A[k*nbands + jjo] += S/D*(sfacx*(fdx[jo])
+                                                    + sfacy*(fdy[jo]));
                         }
                     }
 
                     // u x B motional-EMF source (low magnetic Reynolds number):
-                    // charge continuity div(sigma(grad phi - uxB)) = 0 puts the
-                    // sigma (uxB).n flux on the RHS. Insulator (ZeroNormalGradient)
-                    // faces carry no current, so they get no source. B is the uniform
-                    // applied field (z). [TODO: an insulator BC should strictly enforce
-                    // grad(phi).n = (uxB).n; this is exact only where (uxB).n ~ 0, as at
-                    // the inflow/outflow boundaries of an axial-flow channel.]
-                    double Bz_app = GlobalConfig.applied_Bz;
+                    // charge continuity div(sigma_t(grad phi - uxB)) = 0 puts the
+                    // m.(uxB) flux on the RHS (m = sigma_t^T n; scalar sigma*n when the
+                    // Hall effect is off). Insulator (ZeroNormalGradient) faces carry no
+                    // current, so they get no source. B is the uniform applied field (z).
+                    // [TODO: an insulator BC should strictly enforce grad(phi).n =
+                    // (uxB).n; this is exact only where (uxB).n ~ 0, as at the
+                    // inflow/outflow boundaries of an axial-flow channel.]
                     if (Bz_app != 0.0) {
                         bool insulator = false;
                         if (face.is_on_boundary) {
@@ -330,8 +450,8 @@ class ElectricField {
                         if (!insulator) {
                             double uxf = face.fs.vel.x.re;
                             double uyf = face.fs.vel.y.re;
-                            // (u x B) = (uy*Bz, -ux*Bz, 0); source = sigma (uxB . n_out) S
-                            b[k] += S * sigmaF * (uyf*Bz_app*nxF - uxf*Bz_app*nyF);
+                            // (u x B) = (uy*Bz, -ux*Bz, 0); source = m.(uxB) S
+                            b[k] += S * Bz_app * (mxF*uyf - myF*uxf);
                         }
                     }
                 }
@@ -661,6 +781,7 @@ private:
     ConductivityModel conductivity;
     FieldBC[][] field_bcs;
     int[] block_offsets; // FIXME: Badness with the block id's not matching their order in local fluid blocks
+    bool[] zng_layer;    // cells with one-sided (non-interior) ZNG stencil families; Hall is gated off on their faces
     version(mpi_parallel){
         Exchanger exchanger;
     }

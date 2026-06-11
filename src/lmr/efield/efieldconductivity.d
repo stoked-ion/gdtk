@@ -21,6 +21,13 @@ import lmr.mass_diffusion;
 
 interface ConductivityModel{
     @nogc number opCall(ref const(GasState) gs, const Vector3 pos, GasModel gm);
+    /*
+        Hall parameter beta = omega_ce/nu_e = e*Bz/(m_e*nu_e), signed by Bz, for the
+        tensor (magnetised) conductivity. Models that have no physical electron
+        collision frequency (test/constant correlations) return 0.0, i.e. the
+        conductivity stays scalar and the Hall effect is off.
+    */
+    @nogc double hall_beta(ref const(GasState) gs, GasModel gm, double Bz);
 }
 
 
@@ -30,6 +37,7 @@ class TestConductivity : ConductivityModel{
         double sigma = -1.0*exp(pos.x.re)*cos(pos.y.re);
         return to!number(sigma);
     }
+    @nogc final double hall_beta(ref const(GasState) gs, GasModel gm, double Bz){ return 0.0; }
 }
 
 class ConstantConductivity : ConductivityModel{
@@ -40,6 +48,7 @@ class ConstantConductivity : ConductivityModel{
     @nogc final number opCall(ref const(GasState) gs, const Vector3 pos, GasModel gm){
         return to!number(1.0);
     }
+    @nogc final double hall_beta(ref const(GasState) gs, GasModel gm, double Bz){ return 0.0; }
 }
 
 class RaizerConductivity : ConductivityModel{
@@ -64,6 +73,9 @@ class RaizerConductivity : ConductivityModel{
         //debug{writefln(" gs: %s sigma: %e ", gs, sigma);}
         return sigma;
     }
+    // The Raizer correlation gives sigma directly, with no underlying collision
+    // frequency to build a Hall parameter from; Hall stays off with this model.
+    @nogc final double hall_beta(ref const(GasState) gs, GasModel gm, double Bz){ return 0.0; }
 }
 
 class DiffusionConductivity : ConductivityModel{
@@ -107,6 +119,9 @@ class DiffusionConductivity : ConductivityModel{
         //debug{writefln(" gs: %s sigma: %e ", gs, sigma);}
         return sigma;
     }
+    // No single electron collision frequency falls out of the multi-species
+    // diffusion formulation; Hall stays off with this model.
+    @nogc final double hall_beta(ref const(GasState) gs, GasModel gm, double Bz){ return 0.0; }
 private:
     size_t nsp;
     number[] number_density;
@@ -135,8 +150,28 @@ class CoulombConductivity : ConductivityModel{
     }
 
     @nogc final number opCall(ref const(GasState) gs, const Vector3 pos, GasModel gm){
+        double n_e, nu;
+        electron_collision_state(gs, gm, n_e, nu);
+        double sigma = n_e*elementary_charge*elementary_charge/(_m_e*nu);
+        number result = sigma;
+        return result;
+    }
+    /*
+        Hall parameter from the same electron collision frequency as the
+        conductivity itself: beta = e*Bz/(m_e*nu_e), signed by Bz. Note this is
+        sigma*Bz/(e*n_e), so the tensor conductivity built from (sigma, beta) is
+        internally consistent.
+    */
+    @nogc final double hall_beta(ref const(GasState) gs, GasModel gm, double Bz){
+        if (Bz == 0.0) return 0.0;
+        double n_e, nu;
+        electron_collision_state(gs, gm, n_e, nu);
+        return elementary_charge*Bz/(_m_e*nu);
+    }
+private:
+    @nogc void electron_collision_state(ref const(GasState) gs, GasModel gm, out double n_e, out double nu){
         gm.massf2numden(gs, number_density);
-        double n_e = (electron_idx >= 0) ? number_density[electron_idx].re : 0.0;
+        n_e = (electron_idx >= 0) ? number_density[electron_idx].re : 0.0;
         // Sum heavy-particle densities (everything except electrons) and subtract the
         // ion density (= n_e by quasineutrality, single ionisation) to get neutrals.
         // This avoids depending on gm.charge, which some gas models (e.g. the reacting
@@ -160,12 +195,8 @@ class CoulombConductivity : ConductivityModel{
         double Q_ei = 1.95e-10/(Te*Te)*log(1.53e8*Te*Te*Te/(n_e/1.0e6));
         if (Q_ei < 0.0) Q_ei = 0.0;
         double v_th = sqrt(8.0*Boltzmann_constant*Te/(PI*_m_e));
-        double nu = fmax(n_neutral*v_th*Q_ea + n_e*v_th*Q_ei, 1.0e6);
-        double sigma = n_e*elementary_charge*elementary_charge/(_m_e*nu);
-        number result = sigma;
-        return result;
+        nu = fmax(n_neutral*v_th*Q_ea + n_e*v_th*Q_ei, 1.0e6);
     }
-private:
     immutable double _m_e = 9.10938e-31; // electron mass [kg]
     size_t nsp;
     number[] number_density;

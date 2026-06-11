@@ -641,12 +641,12 @@ end
 -- pluggable sheath_model:
 --   "linear"         J = (dV - Vfall)/Rsheath                 [Rsheath, Vfall]
 --   "diode"          conducts only for |dV| > Vfall           [Rsheath, Vfall, leak]
---   "child-langmuir" J = K*|dV|^1.5 (space-charge-limited)    [K, leak]
+--   "child-langmuir" J = K*|dV|^1.5 (space-charge-limited)    [K, leak, dV_lin]
 --   "saturation"     resistive, capped at the electron sat.   [Rsheath, Vfall, leak]
 -- with dV = phi_edge - Velectrode. All param fields are emitted; the chosen model reads
 -- the ones it needs. Defaults reproduce the Phase-1 linear sheath.
 SheathField = FieldBoundary:new{Velectrode=0.0, sheath_model="linear",
-                                Rsheath=1.0, Vfall=0.0, K=1.0e-3, leak=1.0e-6}
+                                Rsheath=1.0, Vfall=0.0, K=1.0e-3, leak=1.0e-6, dV_lin=1.0}
 SheathField.name = "SheathField"
 function SheathField:new(o)
    o = FieldBoundary.new(self, o)
@@ -659,7 +659,8 @@ function SheathField:tojson()
    str = str .. string.format('"Rsheath": %.18e, ', self.Rsheath)
    str = str .. string.format('"Vfall": %.18e, ', self.Vfall)
    str = str .. string.format('"K": %.18e, ', self.K)
-   str = str .. string.format('"leak": %.18e', self.leak)
+   str = str .. string.format('"leak": %.18e, ', self.leak)
+   str = str .. string.format('"dV_lin": %.18e', self.dV_lin)
    str = str .. '}'
    return str
 end

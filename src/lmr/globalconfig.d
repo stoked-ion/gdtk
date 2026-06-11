@@ -1232,6 +1232,12 @@ final class GlobalConfig {
     // While deferred the field is left unsolved (NaN) so a NaN-aware UDF holds off the
     // MHD forcing -- lets Phase 1 stabilise the pure flow before the coupled field/MHD.
     shared static int electric_field_start_step = 0;
+    // Tensor (magnetised) conductivity in the potential solve: rotate the face
+    // conductivity by the Hall parameter beta = e*Bz/(m_e*nu_e) supplied by the
+    // conductivity model, so J = sigma_t (-grad phi + uxB) with
+    // sigma_P = sigma/(1+beta^2), sigma_H = sigma*beta/(1+beta^2). Default off =
+    // scalar conductivity (also off for models with no collision frequency).
+    shared static bool electric_field_hall_effect = false;
     shared static bool solve_electric_field = false;
     shared static string conductivity_model_name = "none";
 
@@ -2093,6 +2099,7 @@ void set_config_for_core(JSONValue jsonData)
     mixin(update_int("electric_field_gmres_iters", "electric_field_gmres_iters"));
     mixin(update_bool("electric_field_freeze_in_linear_solve", "electric_field_freeze_in_linear_solve"));
     mixin(update_int("electric_field_start_step", "electric_field_start_step"));
+    mixin(update_bool("electric_field_hall_effect", "electric_field_hall_effect"));
     mixin(update_bool("solve_electric_field", "solve_electric_field"));
     mixin(update_string("conductivity_model_name", "conductivity_model_name"));
 
@@ -2190,6 +2197,7 @@ void set_config_for_core(JSONValue jsonData)
         writeln("  electric_field_gmres_iters: ", cfg.electric_field_gmres_iters);
         writeln("  electric_field_freeze_in_linear_solve: ", cfg.electric_field_freeze_in_linear_solve);
         writeln("  electric_field_start_step: ", cfg.electric_field_start_step);
+        writeln("  electric_field_hall_effect: ", cfg.electric_field_hall_effect);
         writeln("  solve_electric_field: ", cfg.solve_electric_field);
         writeln("  conductivity_model_name: ", cfg.conductivity_model_name);
         writeln("  electric_field_work: ", cfg.electric_field_work);

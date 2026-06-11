@@ -355,16 +355,20 @@ class ElectricField {
                             // stencil (facx=facy=fac=0). The electrode current is the sheath
                             // Robin term from the pluggable SheathModel, linearized about the
                             // current plasma-edge potential (NOT scaled by gas sigma).
+                            // Segmented electrodes: insulator strips between segments get
+                            // no Robin term either, leaving J.n = 0 there.
                             facx = 0.0;
                             facy = 0.0;
                             fac = 0.0;
                             sfacx = 0.0;
                             sfacy = 0.0;
                             sfac = 0.0;
-                            double a_diag, b_rhs;
-                            sheath.linearized_robin(face, cell.electric_potential.re, gmodel, a_diag, b_rhs);
-                            A[k*nbands + 2] += a_diag;
-                            b[k]            += b_rhs;
+                            if (sheath.is_electrode(face)) {
+                                double a_diag, b_rhs;
+                                sheath.linearized_robin(face, cell.electric_potential.re, gmodel, a_diag, b_rhs);
+                                A[k*nbands + 2] += a_diag;
+                                b[k]            += b_rhs;
+                            }
                         } else if (field_bc.isShared) {
                             // Block-to-block face: physically interior, so apply the same
                             // (Hall-rotated) direct term as the interior branch. For beta=0

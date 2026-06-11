@@ -119,9 +119,31 @@ class SheathField : FieldBC {
     model, Rsheath -> 0 recovers a hard Dirichlet (FixedField); Rsheath -> inf recovers
     open circuit (insulator).
 */
-    this(double Velectrode, SheathModel model) {
+    this(double Velectrode, SheathModel model,
+         double segment_pitch=0.0, double segment_fill=1.0, double segment_x0=0.0) {
         this.Velectrode = Velectrode;
         this.model = model;
+        this.segment_pitch = segment_pitch;
+        this.segment_fill = segment_fill;
+        this.segment_x0 = segment_x0;
+    }
+
+    /*
+        Segmented electrodes: with the Hall effect on, a continuous conductor
+        short-circuits the axial (Hall) field along the wall and kills the Faraday
+        current; real MHD channels break the electrode into segments separated by
+        insulator strips. The wall is described periodically: starting from
+        segment_x0, each pitch of length segment_pitch is electrode for the first
+        segment_fill fraction and insulator for the rest. segment_pitch <= 0 (the
+        default) means a continuous electrode. Insulator faces get no sheath Robin
+        term and carry no current (J.n = 0), exactly like ZeroNormalGradient in the
+        assembly's treatment of this BC.
+    */
+    @nogc final bool is_electrode(const FVInterface face) const {
+        if (segment_pitch <= 0.0) return true;
+        double s = (face.pos.x.re - segment_x0) % segment_pitch;
+        if (s < 0.0) s += segment_pitch;
+        return s < segment_fill*segment_pitch;
     }
 
     final bool isShared() const { return false; }
@@ -136,6 +158,7 @@ class SheathField : FieldBC {
     final double rhs_stencil_component(double D, double facx, double facy, double fdx, double fdy, FVInterface jface){ return 0.0; }
     final double lhs_stencil_component(double D, double facx, double facy, double fdx, double fdy, FVInterface jface){ return 0.0; }
     final double compute_current(const double sign, const FVInterface face, const FluidFVCell cell){
+        if (!is_electrode(face)) return 0.0; // insulator strip between segments
         double S = face.length.re;
         double dV = cell.electric_potential.re - Velectrode;
         return model.current(dV, face.fs.gas, GlobalConfig.gmodel_master)*S; // sheath current out into electrode
@@ -159,11 +182,13 @@ class SheathField : FieldBC {
         b_rhs  = S*(J0 - Jp*phi_cell);
     }
     override string toString() const {
-        return format("SheathField(Velectrode=%g)", Velectrode);
+        return format("SheathField(Velectrode=%g, segment_pitch=%g, segment_fill=%g)",
+                      Velectrode, segment_pitch, segment_fill);
     }
 private:
     double Velectrode;
     SheathModel model;
+    double segment_pitch, segment_fill, segment_x0;
 }
 
 class MixedField : FieldBC {
@@ -489,7 +514,11 @@ FieldBC create_field_bc(JSONValue field_bc_json, const BoundaryCondition bc, con
     case "SheathField":
         double Velectrode = getJSONdouble(field_bc_json, "Velectrode", 0.0);
         string sheath_model = getJSONstring(field_bc_json, "sheath_model", "linear");
-        field_bc = new SheathField(Velectrode, create_sheath_model(sheath_model, field_bc_json));
+        double segment_pitch = getJSONdouble(field_bc_json, "segment_pitch", 0.0);
+        double segment_fill = getJSONdouble(field_bc_json, "segment_fill", 1.0);
+        double segment_x0 = getJSONdouble(field_bc_json, "segment_x0", 0.0);
+        field_bc = new SheathField(Velectrode, create_sheath_model(sheath_model, field_bc_json),
+                                   segment_pitch, segment_fill, segment_x0);
         break;
     case "MixedField":
         double differential = getJSONdouble(field_bc_json, "differential", 1.0);

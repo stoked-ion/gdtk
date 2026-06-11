@@ -645,8 +645,13 @@ end
 --   "saturation"     resistive, capped at the electron sat.   [Rsheath, Vfall, leak]
 -- with dV = phi_edge - Velectrode. All param fields are emitted; the chosen model reads
 -- the ones it needs. Defaults reproduce the Phase-1 linear sheath.
+-- Segmented electrodes (for Hall-effect runs, where a continuous conductor shorts the
+-- axial Hall field): from segment_x0, each segment_pitch of wall is electrode for the
+-- first segment_fill fraction and insulator (J.n = 0) for the rest. segment_pitch = 0
+-- (default) keeps a continuous electrode.
 SheathField = FieldBoundary:new{Velectrode=0.0, sheath_model="linear",
-                                Rsheath=1.0, Vfall=0.0, K=1.0e-3, leak=1.0e-6, dV_lin=1.0}
+                                Rsheath=1.0, Vfall=0.0, K=1.0e-3, leak=1.0e-6, dV_lin=1.0,
+                                segment_pitch=0.0, segment_fill=1.0, segment_x0=0.0}
 SheathField.name = "SheathField"
 function SheathField:new(o)
    o = FieldBoundary.new(self, o)
@@ -660,7 +665,10 @@ function SheathField:tojson()
    str = str .. string.format('"Vfall": %.18e, ', self.Vfall)
    str = str .. string.format('"K": %.18e, ', self.K)
    str = str .. string.format('"leak": %.18e, ', self.leak)
-   str = str .. string.format('"dV_lin": %.18e', self.dV_lin)
+   str = str .. string.format('"dV_lin": %.18e, ', self.dV_lin)
+   str = str .. string.format('"segment_pitch": %.18e, ', self.segment_pitch)
+   str = str .. string.format('"segment_fill": %.18e, ', self.segment_fill)
+   str = str .. string.format('"segment_x0": %.18e', self.segment_x0)
    str = str .. '}'
    return str
 end

@@ -94,8 +94,20 @@ public:
              if (!lua_isnil(L, -1)) mTol = lua_tonumber(L, -1);
              lua_pop(L, 1);
              break;
+        case "alpha-qss":
+             // Mott's alpha-QSS: stiffly-stable, Jacobian-free. Applied here to the
+             // FULL [species, energy-modes] vector -- species via eval_split_rates, and
+             // each energy mode via a positive/negative split of its exchange rate
+             // (production if gaining, loss if relaxing). Stable for the fast electron
+             // relaxation + ionisation that makes the explicit RKF path hang/diverge.
+             mUseAlphaQss = true;
+             lua_getfield(L, -1, "eps1");     if (!lua_isnil(L, -1)) mEps1   = lua_tonumber(L, -1);          lua_pop(L, 1);
+             lua_getfield(L, -1, "eps2");     if (!lua_isnil(L, -1)) mEps2   = lua_tonumber(L, -1);          lua_pop(L, 1);
+             lua_getfield(L, -1, "delta");    if (!lua_isnil(L, -1)) mDelta  = lua_tonumber(L, -1);          lua_pop(L, 1);
+             lua_getfield(L, -1, "maxIters"); if (!lua_isnil(L, -1)) mMaxIter = to!int(luaL_checkinteger(L, -1)); lua_pop(L, 1);
+             break;
         default:
-             string errMsg = format("ERROR: The odeStep '%s' cannot be used with TwoTemperatureThermochemicalReactor.\n", ode_method);
+             string errMsg = format("ERROR: The odeStep '%s' cannot be used with MultiTemperatureThermochemicalReactor (use 'rkf' or 'alpha-qss').\n", ode_method);
              throw new Error(errMsg);
         }
         lua_pop(L, 1); // pops 'odeStep'
@@ -131,6 +143,11 @@ public:
         m_k4.length = mNSpecies + mNModes;
         m_k5.length = mNSpecies + mNModes;
         m_k6.length = mNSpecies + mNModes;
+        // alpha-QSS working arrays (full [species, energy-modes] vector)
+        int n = mNSpecies + mNModes;
+        _q0.length=n; _L0.length=n; _p0.length=n; _yp.length=n; _yp0.length=n;
+        _qp.length=n; _Lp.length=n; _pp.length=n; _qtilda.length=n; _pbar.length=n;
+        _alpha.length=n; _alphabar.length=n; _yc.length=n;
     }
 
     @nogc
@@ -181,7 +198,9 @@ public:
             h = min(h, tInterval - t);
             attempt = 0;
             for ( ; attempt < mMaxAttempts; ++attempt) {
-                ResultOfStep result = step(gs, m_y0, h, m_yOut, dtSuggest);
+                ResultOfStep result = mUseAlphaQss
+                    ? stepAlphaQss(gs, m_y0, h, m_yOut, dtSuggest)
+                    : step(gs, m_y0, h, m_yOut, dtSuggest);
                 // Unpack m_yOut
                 foreach (isp; 0 .. mNSpecies) mConc0[isp] = m_yOut[isp];
 
@@ -340,6 +359,12 @@ private:
     number[] m_k4;
     number[] m_k5;
     number[] m_k6;
+    // alpha-QSS parameters and working arrays (full [species, energy-modes] vector)
+    bool mUseAlphaQss = false;
+    double mEps1 = 1.0e-3, mEps2 = 1.0e-3, mDelta = 1.0e-10;
+    int mMaxIter = 10;
+    immutable double _ZERO_EPS = 1.0e-50;
+    number[] _q0, _L0, _p0, _yp, _yp0, _qp, _Lp, _pp, _qtilda, _pbar, _alpha, _alphabar, _yc;
 
     @nogc
     void evalRates(ref GasState gs, number[] y, ref number[] rates) {
@@ -427,6 +452,91 @@ private:
         // else, failed step
         scale = max(safe*pow(err, -alpha), minscale);
         hSuggest = scale*h;
+        return ResultOfStep.failure;
+    }
+
+    // ----------------------------------------------------------------------
+    // alpha-QSS (Mott) integrator over the full [species, energy-modes] vector.
+    // ----------------------------------------------------------------------
+    @nogc
+    void evalSplitRatesFull(ref GasState gs, number[] y, number[] q, number[] L) {
+        // Species production / loss rates.
+        mConc[] = y[0 .. mNSpecies];
+        mRmech.eval_split_rates(mConc, q[0 .. mNSpecies], L[0 .. mNSpecies]);
+        // Energy-mode net rates -> positive/negative split (production if gaining,
+        // loss if relaxing). The loss branch gives the stiffly-stable relaxation.
+        gs.u_modes[] = y[mNSpecies .. $];
+        gs.u = m_uTotal - sum(gs.u_modes);
+        mEES.evalRates(gs, mRmech, m_duvedt);
+        foreach (m; 0 .. mNModes) {
+            number r = m_duvedt[m];
+            if (r.re >= 0.0) { q[mNSpecies + m] = r;   L[mNSpecies + m] = 0.0; }
+            else             { q[mNSpecies + m] = 0.0; L[mNSpecies + m] = -r;  }
+        }
+    }
+
+    @nogc void aqss_p_on_y(number[] L, number[] y, number[] p_y, int n) {
+        foreach (i; 0 .. n) p_y[i] = L[i] / (y[i] + _ZERO_EPS);
+    }
+    @nogc void aqss_alpha(number[] p, number[] alpha, double h, int n) {
+        foreach (i; 0 .. n) {
+            number r = 1.0/(p[i]*h + _ZERO_EPS);
+            alpha[i] = (180.0*r*r*r + 60.0*r*r + 11.0*r + 1.0)/(360.0*r*r*r + 60.0*r*r + 12.0*r + 1.0);
+        }
+    }
+    @nogc void aqss_update(number[] yTmp, number[] y0, number[] q, number[] p, number[] alpha, double h, int n) {
+        foreach (i; 0 .. n) yTmp[i] = y0[i] + (h*(q[i] - p[i]*y0[i]))/(1.0 + alpha[i]*h*p[i]);
+    }
+    @nogc bool aqss_converged(in number[] yc, in number[] yp, int n) {
+        foreach (i; 0 .. n) {
+            if (yc[i].re < _ZERO_EPS) continue;
+            if (fabs(yc[i].re - yp[i].re) >= (mEps1*(yc[i].re + mDelta))) return false;
+        }
+        return true;
+    }
+    @nogc double aqss_step_suggest(double h, number[] yc, number[] yp, int n) {
+        double sigma = 0.0;
+        foreach (i; 0 .. n) {
+            if (yc[i].re < _ZERO_EPS) continue;
+            double test = fabs(yc[i].re - yp[i].re)/(mEps2*(yc[i].re + mDelta));
+            if (test > sigma) sigma = test;
+        }
+        if (sigma <= 0.0) return 10.0*h;
+        double x = sigma;
+        x = x - 0.5*(x*x - sigma)/x;
+        x = x - 0.5*(x*x - sigma)/x;
+        x = x - 0.5*(x*x - sigma)/x;
+        return h*((1.0/x) + 0.005);
+    }
+
+    @nogc
+    ResultOfStep stepAlphaQss(ref GasState gs, number[] y0, double h, ref number[] yOut, ref double hSuggest)
+    {
+        immutable int n = mNSpecies + mNModes;
+        // 1. Predictor
+        evalSplitRatesFull(gs, y0, _q0, _L0);
+        aqss_p_on_y(_L0, y0, _p0, n);
+        aqss_alpha(_p0, _alpha, h, n);
+        aqss_update(_yp, y0, _q0, _p0, _alpha, h, n);
+        foreach (i; 0 .. n) _yp0[i] = _yp[i];
+        // 2. Corrector iterations
+        foreach (corr; 0 .. mMaxIter) {
+            evalSplitRatesFull(gs, _yp, _qp, _Lp);
+            aqss_p_on_y(_Lp, _yp, _pp, n);
+            aqss_alpha(_pp, _alphabar, h, n);
+            foreach (i; 0 .. n) {
+                _qtilda[i] = _alphabar[i]*_qp[i] + (1.0 - _alphabar[i])*_q0[i];
+                _pbar[i]   = 0.5*(_p0[i] + _pp[i]);
+            }
+            aqss_update(_yc, y0, _qtilda, _pbar, _alphabar, h, n);
+            if (aqss_converged(_yc, _yp0, n)) {
+                foreach (i; 0 .. n) yOut[i] = _yc[i];
+                hSuggest = aqss_step_suggest(h, _yc, _yp0, n);
+                return ResultOfStep.success;
+            }
+            foreach (i; 0 .. n) _yp[i] = _yc[i];
+        }
+        hSuggest = aqss_step_suggest(h, _yc, _yp0, n);
         return ResultOfStep.failure;
     }
 

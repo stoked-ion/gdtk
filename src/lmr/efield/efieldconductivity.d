@@ -203,6 +203,95 @@ private:
     int electron_idx;
 }
 
+class AirCoulombConductivity : ConductivityModel{
+/*
+    Partially-ionised electrical conductivity for high-temperature AIR:
+        sigma = n_e e^2 / (m_e (nu_en + nu_ei))
+    The electron-neutral momentum-transfer collision frequency is a species-weighted
+    sum over N, O, N2, O2, NO using the cross-section fits of Gnoffo (1989) and
+    Imamura (2018); the electron-ion term is the Coulomb (Spitzer-like) frequency.
+    These are the SAME fits used in the air udf-source-terms.lua, so the field solver
+    and the UDF Lorentz/Joule terms build a consistent (sigma, beta). This is the air
+    analogue of CoulombConductivity (whose electron-neutral fit is argon-specific).
+
+    @author: 2026
+*/
+    this(GasModel gm) {
+        if (!gm.is_plasma) throw new Error("AirCoulombConductivity model requires a GasModel with is_plasma=true");
+        nsp = gm.n_species;
+        number_density.length = nsp;
+        electron_idx = gm.species_index("e-");
+        iN  = gm.species_index("N");
+        iO  = gm.species_index("O");
+        iN2 = gm.species_index("N2");
+        iO2 = gm.species_index("O2");
+        iNO = gm.species_index("NO");
+        // Collect the indices of whichever singly-charged ions the model carries.
+        foreach(nm; ["N2+", "O2+", "N+", "O+", "NO+"]){
+            int idx = gm.species_index(nm);
+            if (idx >= 0) ion_idx ~= idx;
+        }
+    }
+
+    @nogc final number opCall(ref const(GasState) gs, const Vector3 pos, GasModel gm){
+        double n_e, nu;
+        electron_collision_state(gs, gm, n_e, nu);
+        double sigma = n_e*elementary_charge*elementary_charge/(_m_e*nu);
+        number result = sigma;
+        return result;
+    }
+    /*
+        Hall parameter from the same electron collision frequency as the conductivity,
+        beta = e*Bz/(m_e*nu_e), signed by Bz, so the tensor conductivity built from
+        (sigma, beta) is internally consistent.
+    */
+    @nogc final double hall_beta(ref const(GasState) gs, GasModel gm, double Bz){
+        if (Bz == 0.0) return 0.0;
+        double n_e, nu;
+        electron_collision_state(gs, gm, n_e, nu);
+        return elementary_charge*Bz/(_m_e*nu);
+    }
+private:
+    @nogc void electron_collision_state(ref const(GasState) gs, GasModel gm, out double n_e, out double nu){
+        gm.massf2numden(gs, number_density);
+        n_e = (electron_idx >= 0) ? number_density[electron_idx].re : 0.0;
+        n_e = fmax(n_e, 1.0e10);
+        double nN  = (iN  >= 0) ? fmax(number_density[iN ].re, 0.0) : 0.0;
+        double nO  = (iO  >= 0) ? fmax(number_density[iO ].re, 0.0) : 0.0;
+        double nN2 = (iN2 >= 0) ? fmax(number_density[iN2].re, 0.0) : 0.0;
+        double nO2 = (iO2 >= 0) ? fmax(number_density[iO2].re, 0.0) : 0.0;
+        double nNO = (iNO >= 0) ? fmax(number_density[iNO].re, 0.0) : 0.0;
+        double n_ions = 0.0;
+        foreach(idx; ion_idx) n_ions += fmax(number_density[idx].re, 0.0);
+        // Electron temperature is the last (electron/electronic) mode.
+        double Te = (gm.n_modes > 0) ? gs.T_modes[$-1].re : gs.T.re;
+        Te = fmax(3000.0, fmin(Te, 500.0e3));
+        // electron-neutral momentum-transfer cross-sections [m^2] (Gnoffo 1989 / Imamura 2018)
+        double Q_eN  = 5.0e-20;
+        double Q_eO  = fmax(1.2e-20 + 1.7e-24*Te - 2.0e-28*Te*Te, 0.0);
+        double Q_eN2 = fmax(7.5e-20 + 5.5e-24*Te - 1.0e-28*Te*Te, 0.0);
+        double Q_eO2 = fmax(2.0e-20 + 6.0e-24*Te, 0.0);
+        double Q_eNO = 1.0e-19;
+        double v_th = sqrt(8.0*Boltzmann_constant*Te/(PI*_m_e));
+        double nu_en = (4.0/3.0)*v_th*(Q_eN*nN + Q_eO*nO + Q_eN2*nN2 + Q_eO2*nO2 + Q_eNO*nNO);
+        // electron-ion Coulomb collision frequency (same form as the air UDF)
+        double nu_ei = 0.0;
+        if (n_ions > 0.0) {
+            double q2 = elementary_charge*elementary_charge;
+            double a = q2/(12.0*PI*vacuum_permittivity*Boltzmann_constant*Te);
+            double lnArg = 12.0*PI*pow(vacuum_permittivity*Boltzmann_constant/q2, 1.5)*sqrt(Te*Te*Te/n_e);
+            double lnTerm = (lnArg > 1.0) ? log(lnArg) : 0.0;
+            nu_ei = fmax((6.0*PI)*a*a*lnTerm*n_ions*v_th, 0.0);
+        }
+        nu = fmax(nu_en + nu_ei, 1.0e6);
+    }
+    immutable double _m_e = 9.10938e-31; // electron mass [kg]
+    size_t nsp;
+    number[] number_density;
+    int electron_idx, iN, iO, iN2, iO2, iNO;
+    int[] ion_idx;
+}
+
 ConductivityModel create_conductivity_model(string name, GasModel gm){
     ConductivityModel conductivity_model;
     switch (name) {
@@ -220,6 +309,9 @@ ConductivityModel create_conductivity_model(string name, GasModel gm){
         break;
     case "coulomb":
         conductivity_model = new CoulombConductivity(gm);
+        break;
+    case "air_coulomb":
+        conductivity_model = new AirCoulombConductivity(gm);
         break;
     case "none":
         break; //throw new Error("User has asked for solve_electric_field but failed to specify a conductivity model.");

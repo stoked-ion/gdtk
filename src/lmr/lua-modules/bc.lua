@@ -649,9 +649,14 @@ end
 -- axial Hall field): from segment_x0, each segment_pitch of wall is electrode for the
 -- first segment_fill fraction and insulator (J.n = 0) for the rest. segment_pitch = 0
 -- (default) keeps a continuous electrode.
+-- Diagonal mode: Ex_applied ramps the electrode potential axially,
+-- V(x) = Velectrode + Ex_applied*(x - segment_x0). Same Ex_applied on both walls tilts
+-- the equipotentials by the diagonal angle (tan(theta) = beta optimally). Ex_applied = 0
+-- (default) is a flat Faraday electrode.
 SheathField = FieldBoundary:new{Velectrode=0.0, sheath_model="linear",
                                 Rsheath=1.0, Vfall=0.0, K=1.0e-3, leak=1.0e-6, dV_lin=1.0,
-                                segment_pitch=0.0, segment_fill=1.0, segment_x0=0.0}
+                                segment_pitch=0.0, segment_fill=1.0, segment_x0=0.0,
+                                Ex_applied=0.0}
 SheathField.name = "SheathField"
 function SheathField:new(o)
    o = FieldBoundary.new(self, o)
@@ -668,7 +673,8 @@ function SheathField:tojson()
    str = str .. string.format('"dV_lin": %.18e, ', self.dV_lin)
    str = str .. string.format('"segment_pitch": %.18e, ', self.segment_pitch)
    str = str .. string.format('"segment_fill": %.18e, ', self.segment_fill)
-   str = str .. string.format('"segment_x0": %.18e', self.segment_x0)
+   str = str .. string.format('"segment_x0": %.18e, ', self.segment_x0)
+   str = str .. string.format('"Ex_applied": %.18e', self.Ex_applied)
    str = str .. '}'
    return str
 end

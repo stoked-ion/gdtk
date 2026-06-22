@@ -120,12 +120,28 @@ class SheathField : FieldBC {
     open circuit (insulator).
 */
     this(double Velectrode, SheathModel model,
-         double segment_pitch=0.0, double segment_fill=1.0, double segment_x0=0.0) {
+         double segment_pitch=0.0, double segment_fill=1.0, double segment_x0=0.0,
+         double Ex_applied=0.0) {
         this.Velectrode = Velectrode;
         this.model = model;
         this.segment_pitch = segment_pitch;
         this.segment_fill = segment_fill;
         this.segment_x0 = segment_x0;
+        this.Ex_applied = Ex_applied;
+    }
+
+    /*
+        Diagonal-mode electrode: the electrode metal potential ramps linearly along the
+        channel axis, V(x) = Velectrode + Ex_applied*(x - segment_x0). With the SAME
+        Ex_applied on the anode and the cathode wall, the equipotentials are tilted by the
+        diagonal angle theta (optimally tan(theta) = beta), so a single applied transverse
+        voltage drives the Faraday current while the imposed axial gradient matches the
+        Hall field -- recovering close to the full conductivity at high Hall parameter
+        (where flat Faraday electrodes give only sigma/(1+beta^2)). Ex_applied = 0 (the
+        default) is a flat electrode = Faraday mode.
+    */
+    @nogc final double Velectrode_at(const FVInterface face) const {
+        return Velectrode + Ex_applied*(face.pos.x.re - segment_x0);
     }
 
     /*
@@ -160,7 +176,7 @@ class SheathField : FieldBC {
     final double compute_current(const double sign, const FVInterface face, const FluidFVCell cell){
         if (!is_electrode(face)) return 0.0; // insulator strip between segments
         double S = face.length.re;
-        double dV = cell.electric_potential.re - Velectrode;
+        double dV = cell.electric_potential.re - Velectrode_at(face);
         return model.current(dV, face.fs.gas, GlobalConfig.gmodel_master)*S; // sheath current out into electrode
     }
 
@@ -174,21 +190,21 @@ class SheathField : FieldBC {
         // model linearized about NaN gives a NaN matrix that never recovers (the linear
         // model is immune because phi_cell cancels). Seed the first linearization with
         // dV0 = 0 (phi_cell = Velectrode) so it starts finite; later solves use the real phi.
-        if (phi_cell != phi_cell) phi_cell = Velectrode;
-        double dV0 = phi_cell - Velectrode;
+        if (phi_cell != phi_cell) phi_cell = Velectrode_at(face);
+        double dV0 = phi_cell - Velectrode_at(face);
         double J0 = model.current(dV0, face.fs.gas, gm);
         double Jp = model.conductance(dV0, face.fs.gas, gm);
         a_diag = -S*Jp;
         b_rhs  = S*(J0 - Jp*phi_cell);
     }
     override string toString() const {
-        return format("SheathField(Velectrode=%g, segment_pitch=%g, segment_fill=%g)",
-                      Velectrode, segment_pitch, segment_fill);
+        return format("SheathField(Velectrode=%g, segment_pitch=%g, segment_fill=%g, Ex_applied=%g)",
+                      Velectrode, segment_pitch, segment_fill, Ex_applied);
     }
 private:
     double Velectrode;
     SheathModel model;
-    double segment_pitch, segment_fill, segment_x0;
+    double segment_pitch, segment_fill, segment_x0, Ex_applied;
 }
 
 class MixedField : FieldBC {
@@ -517,8 +533,9 @@ FieldBC create_field_bc(JSONValue field_bc_json, const BoundaryCondition bc, con
         double segment_pitch = getJSONdouble(field_bc_json, "segment_pitch", 0.0);
         double segment_fill = getJSONdouble(field_bc_json, "segment_fill", 1.0);
         double segment_x0 = getJSONdouble(field_bc_json, "segment_x0", 0.0);
+        double Ex_applied = getJSONdouble(field_bc_json, "Ex_applied", 0.0);
         field_bc = new SheathField(Velectrode, create_sheath_model(sheath_model, field_bc_json),
-                                   segment_pitch, segment_fill, segment_x0);
+                                   segment_pitch, segment_fill, segment_x0, Ex_applied);
         break;
     case "MixedField":
         double differential = getJSONdouble(field_bc_json, "differential", 1.0);

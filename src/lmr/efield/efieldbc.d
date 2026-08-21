@@ -121,27 +121,34 @@ class SheathField : FieldBC {
 */
     this(double Velectrode, SheathModel model,
          double segment_pitch=0.0, double segment_fill=1.0, double segment_x0=0.0,
-         double Ex_applied=0.0) {
+         double Ex_applied=0.0, double Ex_quad=0.0, double Ex_cube=0.0) {
         this.Velectrode = Velectrode;
         this.model = model;
         this.segment_pitch = segment_pitch;
         this.segment_fill = segment_fill;
         this.segment_x0 = segment_x0;
         this.Ex_applied = Ex_applied;
+        this.Ex_quad = Ex_quad;
+        this.Ex_cube = Ex_cube;
     }
 
     /*
-        Diagonal-mode electrode: the electrode metal potential ramps linearly along the
-        channel axis, V(x) = Velectrode + Ex_applied*(x - segment_x0). With the SAME
-        Ex_applied on the anode and the cathode wall, the equipotentials are tilted by the
-        diagonal angle theta (optimally tan(theta) = beta), so a single applied transverse
-        voltage drives the Faraday current while the imposed axial gradient matches the
-        Hall field -- recovering close to the full conductivity at high Hall parameter
-        (where flat Faraday electrodes give only sigma/(1+beta^2)). Ex_applied = 0 (the
-        default) is a flat electrode = Faraday mode.
+        Diagonal-mode electrode: the electrode metal potential follows a polynomial profile
+        along the channel axis,
+            V(x) = Velectrode + Ex_applied*dx + Ex_quad*dx^2 + Ex_cube*dx^3,   dx = x - segment_x0,
+        so the imposed axial field is  -dV/dx = -(Ex_applied + 2 Ex_quad dx + 3 Ex_cube dx^2).
+        With the SAME profile on the anode and the cathode wall, the equipotentials are tilted
+        by the diagonal angle theta (optimally tan(theta) = beta), recovering close to the full
+        conductivity at high Hall parameter where flat Faraday electrodes give only
+        sigma/(1+beta^2). A pure linear ramp (Ex_quad = Ex_cube = 0) tilts at a single angle;
+        the quadratic/cubic terms let the tilt track a spatially-varying Hall field beta*E'_y(x)
+        (which can swing by an order of magnitude along a strongly-inhomogeneous channel) -- a
+        constant Ex_applied can only match it at one station. Ex_applied = 0 (the default) is a
+        flat electrode = Faraday mode.
     */
     @nogc final double Velectrode_at(const FVInterface face) const {
-        return Velectrode + Ex_applied*(face.pos.x.re - segment_x0);
+        double dx = face.pos.x.re - segment_x0;
+        return Velectrode + dx*(Ex_applied + dx*(Ex_quad + dx*Ex_cube));
     }
 
     /*
@@ -198,13 +205,13 @@ class SheathField : FieldBC {
         b_rhs  = S*(J0 - Jp*phi_cell);
     }
     override string toString() const {
-        return format("SheathField(Velectrode=%g, segment_pitch=%g, segment_fill=%g, Ex_applied=%g)",
-                      Velectrode, segment_pitch, segment_fill, Ex_applied);
+        return format("SheathField(Velectrode=%g, segment_pitch=%g, segment_fill=%g, Ex_applied=%g, Ex_quad=%g, Ex_cube=%g)",
+                      Velectrode, segment_pitch, segment_fill, Ex_applied, Ex_quad, Ex_cube);
     }
 private:
     double Velectrode;
     SheathModel model;
-    double segment_pitch, segment_fill, segment_x0, Ex_applied;
+    double segment_pitch, segment_fill, segment_x0, Ex_applied, Ex_quad, Ex_cube;
 }
 
 class MixedField : FieldBC {
@@ -534,8 +541,10 @@ FieldBC create_field_bc(JSONValue field_bc_json, const BoundaryCondition bc, con
         double segment_fill = getJSONdouble(field_bc_json, "segment_fill", 1.0);
         double segment_x0 = getJSONdouble(field_bc_json, "segment_x0", 0.0);
         double Ex_applied = getJSONdouble(field_bc_json, "Ex_applied", 0.0);
+        double Ex_quad = getJSONdouble(field_bc_json, "Ex_quad", 0.0);
+        double Ex_cube = getJSONdouble(field_bc_json, "Ex_cube", 0.0);
         field_bc = new SheathField(Velectrode, create_sheath_model(sheath_model, field_bc_json),
-                                   segment_pitch, segment_fill, segment_x0, Ex_applied);
+                                   segment_pitch, segment_fill, segment_x0, Ex_applied, Ex_quad, Ex_cube);
         break;
     case "MixedField":
         double differential = getJSONdouble(field_bc_json, "differential", 1.0);

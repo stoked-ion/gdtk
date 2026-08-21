@@ -21,6 +21,7 @@ import gas.gas_model;
 
 import lmr.bc.boundary_condition;
 import lmr.bc.ghost_cell_effect.full_face_copy;
+import lmr.efield.efieldcircuit;
 import lmr.efield.efieldconductivity;
 import lmr.efield.efieldsheath;
 import lmr.globalconfig;
@@ -212,6 +213,130 @@ private:
     double Velectrode;
     SheathModel model;
     double segment_pitch, segment_fill, segment_x0, Ex_applied, Ex_quad, Ex_cube;
+}
+
+class CircuitElectrode : FieldBC {
+/*
+    Electrode wired into an EXTERNAL CIRCUIT (Path 1).
+
+    Identical to SheathField in every respect -- same pluggable SheathModel, same
+    segmented-electrode geometry, same linearized Robin term -- with exactly one
+    difference: the electrode metal potential is NOT a constant from the Lua input
+    file. It is the unknown q_m of circuit node `node_id`, solved simultaneously
+    with the field.
+
+    Why that difference matters: a fixed Velectrode models an electrode wired to its
+    own ideal, zero-impedance supply. That is correct for Faraday (independent pairs)
+    and for diagonal (a resistor ladder whose taps have negligible impedance), which
+    is why those connections already work with SheathField and should NOT be migrated
+    to this BC. It is wrong for any connection where electrodes are wired TO EACH
+    OTHER -- a Hall short, or segments sharing a ballast network -- because prescribing
+    both terminals' potentials supplies no equation limiting the current that flows
+    between them. See efieldcircuit.d's header and the Path 1 plan, Sec. 1.2.
+
+    Two electrode groups wired together simply name the SAME node id; that shared id
+    IS the short, and the Kirchhoff row for that node is what limits the current.
+
+    PHASE 1 NOTE: this class is not yet consulted by the matrix assembly in efield.d.
+    Constructing a case with it will currently behave as an insulator, because
+    efield.d's assembly branches on `cast(SheathField)` and does not yet know about
+    this type. Wiring it in is Phase 2, together with the Woodbury solve of the
+    augmented system. It is added here first so the data structures and the Lua
+    plumbing can be built and tested independently of the solver change.
+*/
+    this(ExternalCircuit circuit, int node_id, SheathModel model,
+         double segment_pitch=0.0, double segment_fill=1.0, double segment_x0=0.0) {
+        this.circuit = circuit;
+        this.node_id = node_id;
+        this.model = model;
+        this.segment_pitch = segment_pitch;
+        this.segment_fill = segment_fill;
+        this.segment_x0 = segment_x0;
+    }
+
+    // The electrode metal potential: the circuit node's CURRENT estimate. Before the
+    // first solve this is the node's nominal_voltage (see ExternalCircuit.addNode),
+    // which keeps the first sheath linearization finite -- the same role the constant
+    // Velectrode plays in SheathField's NaN guard.
+    final double Velectrode_at(const FVInterface face) const {
+        return circuit.q_of(node_id);
+    }
+
+    // Identical to SheathField.is_electrode -- segmented electrodes leave insulator
+    // strips between segments so a continuous conductor cannot short the axial Hall
+    // field along the wall.
+    @nogc final bool is_electrode(const FVInterface face) const {
+        if (segment_pitch <= 0.0) return true;
+        double s = (face.pos.x.re - segment_x0) % segment_pitch;
+        if (s < 0.0) s += segment_pitch;
+        return s < segment_fill*segment_pitch;
+    }
+
+    final int nodeId() const { return node_id; }
+
+    final bool isShared() const { return false; }
+    final Vector3 other_pos(const FVInterface face) {return face.pos;}
+    final int other_id(const FVInterface face) {return -1;}
+    final double phif(const FVInterface face) { return 0.0; } // gas gradient is ZNG-like here
+    final double lhs_direct_component(double fac, const FVInterface face){ return 0.0; }
+    final double lhs_other_component(double fac, const FVInterface face){ return 0.0; }
+    final double rhs_direct_component(double sign, double fac, const FVInterface face){ return 0.0; }
+    final double rhs_stencil_component(double D, double facx, double facy, double fdx, double fdy, FVInterface jface){ return 0.0; }
+    final double lhs_stencil_component(double D, double facx, double facy, double fdx, double fdy, FVInterface jface){ return 0.0; }
+    final double compute_current(const double sign, const FVInterface face, const FluidFVCell cell){
+        if (!is_electrode(face)) return 0.0; // insulator strip between segments
+        double S = face.length.re;
+        double dV = cell.electric_potential.re - Velectrode_at(face);
+        return model.current(dV, face.fs.gas, GlobalConfig.gmodel_master)*S;
+    }
+
+    /*
+        Sheath linearization, split so the field assembly can route each piece to the
+        right place in the augmented system. Compare SheathField.linearized_robin,
+        which folds the electrode-potential dependence entirely into b_rhs because
+        there Velectrode is a constant.
+
+        Linearizing J about the frozen pair (phi_cell*, q_m*) -- both held at their
+        prior iterate, a Picard step, exactly as SheathField already freezes Jp with
+        respect to phi_cell:
+
+            J(phi_cell, q_m) ~= J0 + Jp*(phi_cell - phi_cell*) - Jp*(q_m - q_m*)
+
+        so the face's contribution to the cell's charge balance, -S*J, matched against
+        a_diag*phi_cell + u_coeff*q_m - b_rhs gives
+
+            a_diag  = -S*Jp        (unchanged from SheathField)
+            u_coeff = +S*Jp        (OPPOSITE sign to a_diag)
+            b_rhs   =  S*(J0 - Jp*phi_cell* + Jp*q_m*)
+
+        The +S*Jp*q_m* term in b_rhs is easy to omit; without it the row does not
+        reduce to SheathField's when q_m is held fixed, which is exactly what the
+        Phase 2 R->0 degeneracy test checks. Do NOT differentiate Jp with respect to
+        q_m -- that would be inconsistent with how phi_cell's nonlinearity is already
+        handled here and in SheathField.
+    */
+    void linearized_robin_circuit(const FVInterface face, double phi_cell, GasModel gm,
+                                  out double a_diag, out double u_coeff, out double b_rhs){
+        double S = face.length.re;
+        double q_m = Velectrode_at(face);
+        if (phi_cell != phi_cell) phi_cell = q_m; // NaN guard, as in SheathField
+        double dV0 = phi_cell - q_m;
+        double J0 = model.current(dV0, face.fs.gas, gm);
+        double Jp = model.conductance(dV0, face.fs.gas, gm);
+        a_diag  = -S*Jp;
+        u_coeff =  S*Jp;
+        b_rhs   =  S*(J0 - Jp*phi_cell + Jp*q_m);
+    }
+
+    override string toString() const {
+        return format("CircuitElectrode(node=%d, segment_pitch=%g, segment_fill=%g)",
+                      node_id, segment_pitch, segment_fill);
+    }
+private:
+    ExternalCircuit circuit;
+    int node_id;
+    SheathModel model;
+    double segment_pitch, segment_fill, segment_x0;
 }
 
 class MixedField : FieldBC {

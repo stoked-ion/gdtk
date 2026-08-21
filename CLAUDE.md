@@ -121,6 +121,18 @@ What the UDF cell table exposes (`pushFluidCellToTable` → `pushFlowStateToTabl
 
 Solves a Poisson equation for electric potential given a conductivity model, wired into the transient loop (`src/lmr/timemarching.d:444`). Enable via `config.solve_electric_field = true`, `config.electric_field_count = N`, `config.conductivity_model_name` (`test` | `constant` | `raizer` | `diffusion` | `none`, see `efieldconductivity.d:118`). Runnable example: `examples/lmr/2D/efield-solver/`. Use it to compute a self-consistent current distribution instead of prescribing **J**.
 
+#### Electrode boundary conditions for the field solver (`efieldbc.d`)
+
+The field solve needs a boundary condition at each electrode. Three exist, in increasing order of what they let the electrode's metal potential do:
+
+- **`FixedField`** — prescribed potential (optionally a profile via `Ex_applied`/`Ex_quad`/`Ex_cube`). No electrode impedance at all.
+- **`SheathField`** — prescribed metal potential `Velectrode`, with a physical sheath impedance in series (`sheath_model = "linear" | "child-langmuir"`; `K` is the Child–Langmuir coefficient, ~500 for argon). Supports segmented electrodes (`segment_pitch`/`segment_fill`/`segment_x0`). **This is the right BC for Faraday and diagonal** — independent electrode pairs, and a resistor-ladder tilt, are both correctly modelled by a prescribed metal potential. Do not migrate those cases.
+- **`CircuitElectrode`** (`efieldcircuit.d`) — the metal potential is an **unknown**, namely the potential of node `node` in `config.external_circuit`. Needed whenever electrodes are wired **to each other** (a Hall short, or segments sharing a ballast network): prescribing both terminals' potentials supplies no equation limiting the current between them, which is what made every earlier Hall attempt diverge. Two electrode groups naming the same node id are thereby shorted together.
+
+`config.external_circuit` is a Lua table of `nodes` (each with a `nominal_voltage`, used to seed the first sheath linearization) and `resistors` (`{a=i, b=j, R=...}` node-to-node, or `{a=i, R=..., V_supply=...}` for a leg to a fixed supply). Resistances are in **Ω·m of depth**, since the 2-D solve carries currents per metre of depth. A node needs either a resistive path to a supply leg or at least one electrode face (its sheath conductance ties it to the plasma, so an isolated electrode pair may float); the circuit as a whole needs at least one supply leg, or it is gauge-singular.
+
+Implementation: the electrode unknowns border the existing 5-band matrix, and the augmented system is solved by a Woodbury/Schur complement (`schurSolve`) — `K+1` solves of the *unmodified* banded operator, so the existing GMRES/ILU path is untouched. Measured cost ≈1.23×/step for `K=2`. With no circuit declared, the code takes exactly the pre-existing path. Correctness anchor: a Faraday case re-expressed as `CircuitElectrode` with `R → 0` reproduces the `SheathField` result to 0.05% in F_x and total current — kept as Tier 0 of the project regression suite.
+
 ### 3. Built-in single-fluid MHD (`version(MHD)`, default on via `MHD ?= 1`) — present but rough in lmr
 
 The Bond/Wheatley single-fluid model, ported from Eilmer 4 (README: "a work in progress"). It is wired through conserved quantities (adds `xB, yB, zB, psi, divB`, and forces z-momentum on in 2D — `conservedquantities.d:133-184`), config keys (`config.MHD`, `MHD_static_field`, `MHD_resistive`, `divergence_cleaning`, `c_h`, `divB_damping_length` — `lua-modules/globalconfig.lua:30`), HLLE flux + Dedner divergence cleaning (`fluxcalc.d:142`), and explicit-update divergence damping (`simcore_gasdynamic_step.d:1122`). **Caveats:**

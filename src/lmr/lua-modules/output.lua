@@ -36,6 +36,32 @@ function output.write_control_file(fileName)
    f:close()
 end
 
+-- Serialize config.external_circuit (a table, or nil) to JSON for the D side.
+-- nil or an empty table yields {"nodes": [], "resistors": []}, which the solver
+-- treats as "no circuit" and takes its usual code path.
+local function externalCircuitToJSON(ck)
+   if ck == nil or ck.nodes == nil or #ck.nodes == 0 then
+      return '{"nodes": [], "resistors": []}'
+   end
+   local ns = {}
+   for _, n in ipairs(ck.nodes or {}) do
+      ns[#ns+1] = string.format('{"nominal_voltage": %.18e, "label": "%s"}',
+                                n.nominal_voltage or 0.0, tostring(n.label or ""))
+   end
+   local rs = {}
+   for _, r in ipairs(ck.resistors or {}) do
+      if r.b ~= nil then
+         rs[#rs+1] = string.format('{"a": %d, "b": %d, "R": %.18e, "V_supply": 0.0}',
+                                   r.a, r.b, r.R)
+      else
+         rs[#rs+1] = string.format('{"a": %d, "b": -1, "R": %.18e, "V_supply": %.18e}',
+                                   r.a, r.R, r.V_supply or 0.0)
+      end
+   end
+   return string.format('{"nodes": [%s], "resistors": [%s]}',
+                        table.concat(ns, ", "), table.concat(rs, ", "))
+end
+
 function output.write_config_file(fileName)
    local f = assert(io.open(fileName, "w"))
    f:write("{\n")
@@ -189,6 +215,7 @@ function output.write_config_file(fileName)
    f:write(string.format('"electric_field_start_step": %d,\n', config.electric_field_start_step))
    f:write(string.format('"electric_field_hall_effect": %s,\n', tostring(config.electric_field_hall_effect)))
    f:write(string.format('"conductivity_model_name": "%s",\n', tostring(config.conductivity_model_name)))
+   f:write(string.format('"external_circuit": %s,\n', externalCircuitToJSON(config.external_circuit)))
    f:write(string.format('"electric_field_work": %s,\n', tostring(config.electric_field_work)))
    f:write(string.format('"electron_pressure_convection_term": %s,\n', tostring(config.electron_pressure_convection_term)))
    f:write(string.format('"apply_bcs_in_parallel": %s,\n',

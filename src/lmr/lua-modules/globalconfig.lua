@@ -42,6 +42,19 @@ configOptionsHidden = { -- hidden from user
    electric_field_hall_effect = false,
    solve_electric_field = false,
    conductivity_model_name="none",
+   -- External-circuit network for CircuitElectrode boundary conditions (Path 1).
+   -- A table, e.g.
+   --   config.external_circuit = {
+   --      nodes     = { {nominal_voltage=400.0, label="seg0"}, {nominal_voltage=0.0} },
+   --      resistors = { {a=0, b=1, R=0.5},              -- node-to-node (bus bar)
+   --                    {a=0, R=1.0e-6, V_supply=400.0} } -- leg to a fixed supply
+   --   }
+   -- nil (the default) = no circuit, and the field solve takes exactly the code
+   -- path it does today.
+   -- NOTE: the default must NOT be nil -- config's __newindex rejects any key whose
+   -- default is nil ("The field '...' cannot be set in 'config' table."), because a
+   -- nil default is indistinguishable from an unknown key. Use an empty table.
+   external_circuit = {},
    electric_field_work = false,
    electron_pressure_convection_term = false,
    --

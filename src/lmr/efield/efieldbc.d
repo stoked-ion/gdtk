@@ -315,6 +315,16 @@ class CircuitElectrode : FieldBC {
         q_m -- that would be inconsistent with how phi_cell's nonlinearity is already
         handled here and in SheathField.
     */
+    // Expose the sheath model's frozen-point current and differential conductance so
+    // the field assembly can feed them to sheathFaceStamp (efieldcircuit.d), which is
+    // the single place the augmented-system sign convention lives.
+    void sheathCurrentAndConductance(const FVInterface face, double phi_star, GasModel gm,
+                                     out double J0, out double Jp) {
+        double dV0 = phi_star - Velectrode_at(face);
+        J0 = model.current(dV0, face.fs.gas, gm);
+        Jp = model.conductance(dV0, face.fs.gas, gm);
+    }
+
     void linearized_robin_circuit(const FVInterface face, double phi_cell, GasModel gm,
                                   out double a_diag, out double u_coeff, out double b_rhs){
         double S = face.length.re;
@@ -642,7 +652,7 @@ private:
 } // end class MPISharedField
 } // end version(mpi_parallel)
 
-FieldBC create_field_bc(JSONValue field_bc_json, const BoundaryCondition bc, const int[] block_offsets, string conductivity_model_name, int ncells){
+FieldBC create_field_bc(JSONValue field_bc_json, const BoundaryCondition bc, const int[] block_offsets, string conductivity_model_name, int ncells, ExternalCircuit circuit=null){
 /*
     Create a field_bc object that will be used later for setting matrix entries near boundaries.
     Currently the data specifying each bc is storied in bc.field_bc as a JSON table.
@@ -670,6 +680,19 @@ FieldBC create_field_bc(JSONValue field_bc_json, const BoundaryCondition bc, con
         double Ex_cube = getJSONdouble(field_bc_json, "Ex_cube", 0.0);
         field_bc = new SheathField(Velectrode, create_sheath_model(sheath_model, field_bc_json),
                                    segment_pitch, segment_fill, segment_x0, Ex_applied, Ex_quad, Ex_cube);
+        break;
+    case "CircuitElectrode":
+        if (circuit is null)
+            throw new Error("A CircuitElectrode boundary condition was requested but no "
+                            ~ "config.external_circuit was defined (or it has no nodes).");
+        int node = getJSONint(field_bc_json, "node", -1);
+        string ce_sheath_model = getJSONstring(field_bc_json, "sheath_model", "linear");
+        double ce_pitch = getJSONdouble(field_bc_json, "segment_pitch", 0.0);
+        double ce_fill = getJSONdouble(field_bc_json, "segment_fill", 1.0);
+        double ce_x0 = getJSONdouble(field_bc_json, "segment_x0", 0.0);
+        field_bc = new CircuitElectrode(circuit, node,
+                                        create_sheath_model(ce_sheath_model, field_bc_json),
+                                        ce_pitch, ce_fill, ce_x0);
         break;
     case "MixedField":
         double differential = getJSONdouble(field_bc_json, "differential", 1.0);

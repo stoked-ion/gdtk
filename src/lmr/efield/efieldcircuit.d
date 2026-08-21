@@ -213,6 +213,47 @@ private:
 }
 
 /*
+    Build an ExternalCircuit from the config JSON emitted by output.lua:
+        {"nodes": [{"nominal_voltage": .., "label": ".."}, ..],
+         "resistors": [{"a": i, "b": j, "R": .., "V_supply": ..}, ..]}
+    b < 0 marks a leg to a fixed supply. Returns null when there are no nodes, which
+    is the signal to the field solver to take its ordinary (non-circuit) path.
+*/
+ExternalCircuit create_external_circuit(string json_text)
+{
+    import std.json : parseJSON, JSONValue, JSONType;
+    if (json_text.length == 0) return null;
+    JSONValue j;
+    try { j = parseJSON(json_text); }
+    catch (Exception e) {
+        throw new Error("could not parse config external_circuit as JSON: " ~ e.msg);
+    }
+    if (("nodes" !in j) || j["nodes"].type != JSONType.array) return null;
+    if (j["nodes"].array.length == 0) return null;
+
+    auto ck = new ExternalCircuit();
+    foreach (n; j["nodes"].array) {
+        double v = ("nominal_voltage" in n) ? n["nominal_voltage"].get!double : 0.0;
+        string lab = ("label" in n) ? n["label"].str : "";
+        ck.addNode(v, lab);
+    }
+    if ("resistors" in j && j["resistors"].type == JSONType.array) {
+        foreach (r; j["resistors"].array) {
+            int a = r["a"].get!int;
+            int b = ("b" in r) ? r["b"].get!int : -1;
+            double R = r["R"].get!double;
+            if (b < 0) {
+                double V = ("V_supply" in r) ? r["V_supply"].get!double : 0.0;
+                ck.addSupplyLeg(a, R, V);
+            } else {
+                ck.addResistor(a, b, R);
+            }
+        }
+    }
+    return ck;
+}
+
+/*
     THE SIGN CONVENTION, IN ONE PLACE.
 
     Every contribution the external circuit makes to the augmented system comes
@@ -249,12 +290,19 @@ void sheathFaceStamp(double S, double J0, double Jp, double phi_star, double q_s
                      out double c_node)  // -> c[m]
 {
     immutable double konst = S*(J0 - Jp*phi_star + Jp*q_star);
+    // Cell row. efield.d assembles A*phi = b, so the residual contribution is
+    // a_diag*phi + u_coeff*q - b_cell, and it must equal -S*J_lin.
     a_diag   = -S*Jp;
     u_coeff  =  S*Jp;
-    b_cell   = -konst;
-    wt_coeff = -S*Jp;
-    l_diag   =  S*Jp;
-    c_node   =  konst;
+    b_cell   =  konst;
+    // Node row. Kirchhoff at the electrode: the plasma current INTO the electrode is
+    // +S*J (equal and opposite to the cell's -S*J), and the network contributes
+    // (q - V)/R. assemble_L_and_c stamps the network as L += +1/R, c += +V/R, so the
+    // sheath part must carry the sign that is consistent with THAT, not merely the
+    // negation of the cell row.
+    wt_coeff =  S*Jp;
+    l_diag   = -S*Jp;
+    c_node   = -konst;
 }
 
 /*
@@ -280,14 +328,27 @@ void sheathFaceStamp(double S, double J0, double Jp, double phi_star, double q_s
     matrix, it is the better-conditioned formulation, not merely the cheaper one.
 */
 void schurSolve(double[] delegate(const(double)[]) solveA0,
-                const double[][] Uc,      // [K][N] -- column m of Uc as Uc[m]
-                const double[][] Wt,      // [K][N]
-                const double[] L,         // K*K row-major
-                const double[] b0,        // N
-                const double[] c,         // K
-                ref double[] phi,         // out, N
-                ref double[] q)           // out, K
+                const double[][] Uc,      // [K][N_local] -- column m of Uc as Uc[m]
+                const double[][] Wt,      // [K][N_local]
+                const double[] L,         // K*K row-major, ALREADY reduced across ranks
+                const double[] b0,        // N_local
+                const double[] c,         // K, ALREADY reduced across ranks
+                ref double[] phi,         // out, N_local
+                ref double[] q,           // out, K
+                void delegate(double[]) allreduceSum = null)
 {
+    /*
+        MPI note. N is the LOCAL cell count: every rank owns its own slice of the
+        domain, so Uc[m] and Wt[m] index THIS rank's cells and must never be summed
+        element-wise across ranks (doing so adds together unrelated cells and
+        silently corrupts the coupling).
+
+        What IS global is the dot products Wt.X and Wt.y0, which are sums over every
+        cell in the domain. Those partial sums are formed locally here and combined
+        through `allreduceSum`, along with the K x K Schur complement. L and c must
+        already be reduced by the caller, since their sheath contributions come from
+        faces that may live on any rank.
+    */
     import nm.bbla : Matrix, gaussJordanElimination;
     immutable size_t K = Uc.length;
     immutable size_t N = b0.length;
@@ -299,16 +360,24 @@ void schurSolve(double[] delegate(const(double)[]) solveA0,
 
     // Schur complement and its RHS. Caller must have already reduced Uc/Wt/L/c
     // across MPI ranks if the problem is distributed.
-    auto Aug = new Matrix!double(K, K+1);
+    // local partial sums of the global dot products Wt.X and Wt.y0
+    auto packed = new double[K*K + K];
     foreach (i; 0 .. K) {
         foreach (j; 0 .. K) {
             double wtx = 0.0;
             foreach (n; 0 .. N) wtx += Wt[i][n]*X[j][n];
-            Aug[i, j] = L[i*K + j] - wtx;
+            packed[i*K + j] = wtx;
         }
         double wty = 0.0;
         foreach (n; 0 .. N) wty += Wt[i][n]*y0[n];
-        Aug[i, K] = c[i] - wty;
+        packed[K*K + i] = wty;
+    }
+    if (allreduceSum !is null) allreduceSum(packed);
+
+    auto Aug = new Matrix!double(K, K+1);
+    foreach (i; 0 .. K) {
+        foreach (j; 0 .. K) Aug[i, j] = L[i*K + j] - packed[i*K + j];
+        Aug[i, K] = c[i] - packed[K*K + i];
     }
     gaussJordanElimination!double(Aug);
 
@@ -450,44 +519,63 @@ unittest {
 // of the full augmented system. A convention error cannot pass them.
 // ---------------------------------------------------------------------------
 
-// Identity 1: with the node frozen, the cell row must reduce EXACTLY to
-// SheathField.linearized_robin (a_diag = -S*Jp, b_rhs = S*(J0 - Jp*phi)).
-// This is what guarantees the R->0 degeneracy test can pass at all.
+// Identity 1: with the node frozen, the CELL row must reduce to exactly what
+// efield.d already assembles for SheathField. Note this is checked against
+// SheathField's real convention -- A[k,k] += a_diag and b[k] += b_rhs in an
+// A*phi = b system -- not against an internally-chosen sign, because an earlier
+// version of these tests was self-consistent and still disagreed with efield.d.
 unittest {
     immutable double S = 1.7, J0 = -0.35, Jp = 0.82, phi_star = 3.1, q_star = 411.0;
     double a_diag, u_coeff, b_cell, wt_coeff, l_diag, c_node;
     sheathFaceStamp(S, J0, Jp, phi_star, q_star,
                     a_diag, u_coeff, b_cell, wt_coeff, l_diag, c_node);
 
-    // SheathField's stamps, for the same face with Velectrode = q_star:
-    immutable double old_a_diag = -S*Jp;
-    immutable double old_b_rhs  =  S*(J0 - Jp*phi_star);
-    // efield.d assembles SheathField as: A[k,k] += a_diag; b[k] += b_rhs.
-    // The circuit path assembles: A0[k,k] += a_diag; b0[k] += b_cell; and the q
-    // column contributes u_coeff*q. Freezing q at q_star must give the same row.
-    immutable double phi_probe = 2.4;
-    immutable double circuit_row = a_diag*phi_probe + u_coeff*q_star - (-b_cell);
-    immutable double sheath_row  = old_a_diag*phi_probe - old_b_rhs;
-    assert(abs(circuit_row - sheath_row) < 1.0e-12,
-           "circuit stamp must reduce to SheathField when the node is frozen");
+    // What SheathField.linearized_robin returns for the same face, with
+    // Velectrode = q_star (efield.d does: A[k,k] += a_diag; b[k] += b_rhs).
+    immutable double sf_a_diag = -S*Jp;
+    immutable double sf_b_rhs  =  S*(J0 - Jp*phi_star);
 
-    // and both must equal the physical -S*J(dV) at the frozen point
-    immutable double dV = phi_probe - q_star;
-    immutable double J_lin = J0 + Jp*((dV) - (phi_star - q_star));
-    assert(abs(circuit_row - (-S*J_lin)) < 1.0e-12,
-           "circuit stamp must represent -S*J_lin");
+    // Freezing q at q_star moves the Uc term to the right-hand side.
+    assert(abs(a_diag - sf_a_diag) < 1.0e-12, "a_diag must match SheathField");
+    immutable double b_effective = b_cell - u_coeff*q_star;
+    assert(abs(b_effective - sf_b_rhs) < 1.0e-12,
+           "with the node frozen, b_cell - Uc*q must equal SheathField's b_rhs");
+
+    // and the row residual must be the physical -S*J_lin
+    immutable double phi_probe = 2.4;
+    immutable double J_lin = J0 + Jp*((phi_probe - q_star) - (phi_star - q_star));
+    immutable double resid = a_diag*phi_probe + u_coeff*q_star - b_cell;
+    assert(abs(resid - (-S*J_lin)) < 1.0e-12, "cell row must represent -S*J_lin");
 }
 
-// Identity 2: the cell and node rows must see equal and opposite plasma current
-// (the same current leaves the plasma and enters the electrode). A transposition
-// slip that made them the same sign would violate charge conservation.
+// Identity 2: the NODE row must be Kirchhoff's law written with the SAME sign
+// convention assemble_L_and_c uses for the network (L += +1/R, c += +V/R).
+// Checking only that the cell and node rows are "equal and opposite" is NOT
+// enough -- that is satisfied by both sign choices, and the wrong one silently
+// negates half the row relative to the network stamp.
 unittest {
+    immutable double S = 2.0, J0 = 0.5, Jp = 1.25, phi_star = 1.0, q_star = 7.0;
+    immutable double R = 4.0, Vsup = 33.0;
     double a_diag, u_coeff, b_cell, wt_coeff, l_diag, c_node;
-    sheathFaceStamp(2.0, 0.5, 1.25, 1.0, 7.0,
+    sheathFaceStamp(S, J0, Jp, phi_star, q_star,
                     a_diag, u_coeff, b_cell, wt_coeff, l_diag, c_node);
-    assert(abs(a_diag + l_diag)  < 1.0e-14, "A0 diagonal and L diagonal must be opposite");
-    assert(abs(u_coeff + wt_coeff) < 1.0e-14, "Uc and Wt entries must be opposite");
-    assert(abs(b_cell + c_node)  < 1.0e-14, "b0 and c constants must be opposite");
+
+    // network stamp, exactly as assemble_L_and_c produces it
+    auto ck = new ExternalCircuit();
+    ck.addNode(q_star); ck.addSupplyLeg(0, R, Vsup);
+    double[] Lnet, cnet; ck.assemble_L_and_c(Lnet, cnet);
+
+    // Full node row: Wt*phi + L*q = c. Its residual must equal
+    // S*J_lin + (q - Vsup)/R, which is Kirchhoff at this electrode.
+    immutable double phi_probe = 1.9, q_probe = 6.2;
+    immutable double L_total = l_diag + Lnet[0];
+    immutable double c_total = c_node + cnet[0];
+    immutable double resid = wt_coeff*phi_probe + L_total*q_probe - c_total;
+    immutable double J_lin = J0 + Jp*((phi_probe - q_probe) - (phi_star - q_star));
+    immutable double expect = S*J_lin + (q_probe - Vsup)/R;
+    assert(abs(resid - expect) < 1.0e-12,
+           format("node row must be Kirchhoff in the network's sign convention: "
+                  ~ "%g vs %g", resid, expect));
 }
 
 version(unittest) {

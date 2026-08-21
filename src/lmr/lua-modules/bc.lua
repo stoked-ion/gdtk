@@ -655,6 +655,36 @@ end
 -- (tan(theta) = beta optimally). The quadratic/cubic terms let the tilt track a
 -- spatially-varying Hall field beta*E'_y(x); a pure linear ramp (Ex_quad=Ex_cube=0) tilts
 -- at one angle. Ex_applied = 0 (default) is a flat Faraday electrode.
+-- CircuitElectrode: like SheathField, but the electrode metal potential is an
+-- UNKNOWN solved together with the field -- the potential of circuit node `node`
+-- in config.external_circuit. Use this only when electrodes are wired TO EACH
+-- OTHER (a Hall short, or segments sharing a ballast network); for independent
+-- pairs (Faraday) or a prescribed tilt (diagonal), SheathField is correct and
+-- cheaper. Two electrode groups naming the SAME node are shorted together.
+CircuitElectrode = FieldBoundary:new{node=0, sheath_model="linear",
+                                     Rsheath=1.0, Vfall=0.0, K=1.0e-3, leak=1.0e-6, dV_lin=1.0,
+                                     segment_pitch=0.0, segment_fill=1.0, segment_x0=0.0}
+CircuitElectrode.name = "CircuitElectrode"
+function CircuitElectrode:new(o)
+   o = FieldBoundary.new(self, o)
+   return o
+end
+function CircuitElectrode:tojson()
+   local str = string.format(' {"name": "%s", ', self.name)
+   str = str .. string.format('"node": %d, ', self.node)
+   str = str .. string.format('"sheath_model": "%s", ', self.sheath_model)
+   str = str .. string.format('"Rsheath": %.18e, ', self.Rsheath)
+   str = str .. string.format('"Vfall": %.18e, ', self.Vfall)
+   str = str .. string.format('"K": %.18e, ', self.K)
+   str = str .. string.format('"leak": %.18e, ', self.leak)
+   str = str .. string.format('"dV_lin": %.18e, ', self.dV_lin)
+   str = str .. string.format('"segment_pitch": %.18e, ', self.segment_pitch)
+   str = str .. string.format('"segment_fill": %.18e, ', self.segment_fill)
+   str = str .. string.format('"segment_x0": %.18e', self.segment_x0)
+   str = str .. '}'
+   return str
+end
+
 SheathField = FieldBoundary:new{Velectrode=0.0, sheath_model="linear",
                                 Rsheath=1.0, Vfall=0.0, K=1.0e-3, leak=1.0e-6, dV_lin=1.0,
                                 segment_pitch=0.0, segment_fill=1.0, segment_x0=0.0,

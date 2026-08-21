@@ -1240,6 +1240,9 @@ final class GlobalConfig {
     shared static bool electric_field_hall_effect = false;
     shared static bool solve_electric_field = false;
     shared static string conductivity_model_name = "none";
+    // External-circuit network (Path 1) as a JSON string, parsed by ElectricField.
+    // Empty / no nodes = no circuit, and the field solve takes its usual path.
+    shared static string external_circuit = "";
 
     // Parameters controlling viscous/molecular transport
     //
@@ -2102,6 +2105,10 @@ void set_config_for_core(JSONValue jsonData)
     mixin(update_bool("electric_field_hall_effect", "electric_field_hall_effect"));
     mixin(update_bool("solve_electric_field", "solve_electric_field"));
     mixin(update_string("conductivity_model_name", "conductivity_model_name"));
+    // external_circuit arrives as a JSON object; keep it as text for ElectricField.
+    if ("external_circuit" in jsonData) {
+        cfg.external_circuit = jsonData["external_circuit"].toJSON();
+    }
 
     mixin(update_bool("electric_field_work", "electric_field_work"));
     mixin(update_bool("electron_pressure_convection_term", "electron_pressure_convection_term"));

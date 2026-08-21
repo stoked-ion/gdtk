@@ -21,6 +21,7 @@ import nm.number;
 import ntypes.complex;
 
 import lmr.efield.efieldbc;
+import lmr.efield.efieldcircuit;
 import lmr.efield.efieldconductivity;
 import lmr.efield.efieldderivatives;
 import lmr.efield.efieldexchange;
@@ -65,11 +66,20 @@ class ElectricField {
         // I don't want random bits of the field module hanging off the boundary conditions.
         // Doing it this way is bad encapsulation, but it makes sure that other people only break my code
         // rather than the other way around.
+        // External circuit (Path 1). Null unless config.external_circuit declares
+        // nodes, in which case every solve takes the augmented-system path below.
+        circuit = create_external_circuit(GlobalConfig.external_circuit);
+        if (circuit !is null) {
+            string why;
+            if (!circuit.isGrounded(why))
+                throw new Error("external_circuit is not solvable: " ~ why);
+        }
+
         field_bcs.length = localFluidBlocks.length;
         foreach(i, block; localFluidBlocks){
             field_bcs[i].length = block.bc.length;
             foreach(j, bc; block.bc){
-                field_bcs[i][j] = create_field_bc(bc.field_bc, bc, block_offsets, conductivity_model_name, N);
+                field_bcs[i][j] = create_field_bc(bc.field_bc, bc, block_offsets, conductivity_model_name, N, circuit);
             }
         }
 
@@ -106,6 +116,20 @@ class ElectricField {
         A[] = 0.0;
         b[] = 0.0;
         Ai[] = -1;
+
+        // Border blocks of the augmented system (Path 1). Only touched when a
+        // circuit is present; otherwise everything below is exactly as before.
+        immutable size_t K = (circuit is null) ? 0 : circuit.nnodes;
+        if (circuit !is null) {
+            if (Uc.length != K) {
+                Uc.length = K; Wt.length = K;
+                foreach (m; 0 .. K) { Uc[m].length = N; Wt[m].length = N; }
+                Lmat.length = K*K; cvec.length = K;
+            }
+            foreach (m; 0 .. K) { Uc[m][] = 0.0; Wt[m][] = 0.0; }
+            // start from the network's own stamp; the sheath faces add to it below
+            circuit.assemble_L_and_c(Lmat, cvec);
+        }
 
         FluidFVCell other;
         foreach(blkid, block; localFluidBlocks){
@@ -349,6 +373,32 @@ class ElectricField {
                             sfacx = sigmaF*nxF;
                             sfacy = sigmaF*nyF;
                             sfac = 0.0;
+                        } else if (auto celec = cast(CircuitElectrode) field_bc){
+                            // Electrode wired into the external circuit. Same
+                            // suppression of the gas-conduction stencil as SheathField
+                            // (the cold face carries ~no current); the difference is
+                            // that the electrode potential is an UNKNOWN, so the
+                            // linearization contributes to four blocks rather than two.
+                            facx = 0.0; facy = 0.0; fac = 0.0;
+                            sfacx = 0.0; sfacy = 0.0; sfac = 0.0;
+                            if (celec.is_electrode(face)) {
+                                double S_f = face.length.re;
+                                double q_star = celec.Velectrode_at(face);
+                                double phi_star = cell.electric_potential.re;
+                                if (phi_star != phi_star) phi_star = q_star; // NaN guard
+                                double J0, Jp;
+                                celec.sheathCurrentAndConductance(face, phi_star, gmodel, J0, Jp);
+                                double ad, uc, bc_, wt, ld, cn;
+                                sheathFaceStamp(S_f, J0, Jp, phi_star, q_star,
+                                                ad, uc, bc_, wt, ld, cn);
+                                int m = celec.nodeId();
+                                A[k*nbands + 2] += ad;
+                                b[k]            += bc_;
+                                Uc[m][k]        += uc;
+                                Wt[m][k]        += wt;
+                                Lmat[m*K + m]   += ld;
+                                cvec[m]         += cn;
+                            }
                         } else if (auto sheath = cast(SheathField) field_bc){
                             // Electrode sheath: the gas carries ~no current at the cold
                             // electrode face (face sigma ~ 0), so suppress its gas-conduction
@@ -394,7 +444,8 @@ class ElectricField {
                         int jjo = (jo>1) ? to!int(jo+1) : to!int(jo); // -> [0,1,3,4] since 2 is the entry for "cell"
                         if (jface.is_on_boundary) {
                             auto field_bc = field_bcs[blkid][jface.bc_id];
-                            if ((cast(SheathField) field_bc) !is null) {
+                            if (((cast(SheathField) field_bc) !is null) ||
+                                ((cast(CircuitElectrode) field_bc) !is null)) {
                                 // The sheath wall supplies no phi data point (its stencil
                                 // components are zero) and the cell keeps the interior R_*
                                 // weights (see the celltype note above), so dropping this
@@ -449,7 +500,8 @@ class ElectricField {
                         if (face.is_on_boundary) {
                             auto fbc = field_bcs[blkid][face.bc_id];
                             if (((cast(ZeroNormalGradient) fbc) !is null) ||
-                                ((cast(SheathField) fbc) !is null)) insulator = true;
+                                ((cast(SheathField) fbc) !is null) ||
+                                ((cast(CircuitElectrode) fbc) !is null)) insulator = true;
                         }
                         if (!insulator) {
                             double uxf = face.fs.vel.x.re;
@@ -471,6 +523,13 @@ class ElectricField {
                     double Akk = A[k*nbands + 2];
                     b[k] /= Akk;
                     foreach(iio; 0 .. nbands) A[k*nbands + iio] /= Akk;
+                    // Uc is part of THIS SAME ROW of the augmented system, so it must
+                    // take the identical row scaling. (Leaving it unscaled makes the
+                    // circuit coupling wrong by a factor of Akk per row -- the field
+                    // then sees an electrode potential scaled by the local diagonal,
+                    // which diverges within a few steps.) Wt/Lmat/cvec belong to the
+                    // circuit ROWS, not the cell rows, so they are untouched here.
+                    if (circuit !is null) foreach (m; 0 .. K) Uc[m][k] /= Akk;
                 }
             }
         }
@@ -480,8 +539,79 @@ class ElectricField {
         // Far stronger than point-Jacobi alone for the variable-conductivity Poisson.
         gmres.build_ilu_preconditioner(N, nbands, A, Ai);
 
-        phi0[] = 0.0;
-        gmres.solve(N, nbands, A, Ai, b, phi0, phi, max_iter, verbose);
+        if (circuit is null) {
+            // ---- ordinary path: byte-for-byte what this solver has always done ----
+            phi0[] = 0.0;
+            gmres.solve(N, nbands, A, Ai, b, phi0, phi, max_iter, verbose);
+        } else {
+            // ---- augmented (external-circuit) path: Woodbury/Schur ----
+            // The border blocks are rank-local: a node's faces may live on cells owned
+            // by different ranks, so Uc/Wt/Lmat/cvec must be summed across ranks before
+            // the Schur complement is formed. (Skipping this is silently correct on one
+            // rank and silently WRONG on many -- each rank would solve for a different
+            // q and the reconstructed phi would be globally inconsistent.)
+            version(mpi_parallel) {
+                // Uc and Wt are indexed by LOCAL cell id and must NOT be reduced
+                // element-wise -- that would add together unrelated cells on different
+                // ranks. Only quantities that are genuinely global get reduced: the
+                // K x K / K dot products (handled inside schurSolve via the delegate
+                // below) and the sheath contributions to L and c, whose faces may live
+                // on any rank.
+                //
+                // Lmat/cvec include the network stamp, which every rank computed
+                // identically; reduce only the sheath contributions by subtracting the
+                // common part, summing, then adding it back once.
+                double[] Lnet, cnet;
+                circuit.assemble_L_and_c(Lnet, cnet);
+                foreach (i; 0 .. K*K) Lmat[i] -= Lnet[i];
+                foreach (i; 0 .. K)   cvec[i] -= cnet[i];
+                MPI_Allreduce(MPI_IN_PLACE, Lmat.ptr, to!int(K*K), MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+                MPI_Allreduce(MPI_IN_PLACE, cvec.ptr, to!int(K),   MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+                foreach (i; 0 .. K*K) Lmat[i] += Lnet[i];
+                foreach (i; 0 .. K)   cvec[i] += cnet[i];
+            }
+
+            // K+1 solves of the UNMODIFIED banded system. The preconditioner is built
+            // once above and reused for all of them.
+            auto solveA0 = delegate double[](const(double)[] rhs) {
+                auto rr = new double[N];
+                foreach (i; 0 .. N) rr[i] = rhs[i];
+                auto xx = new double[N];
+                auto x0 = new double[N]; x0[] = 0.0;
+                gmres.solve(N, nbands, A, Ai, rr, x0, xx, max_iter, false);
+                return xx;
+            };
+            void delegate(double[]) reducer = null;
+            version(mpi_parallel) {
+                reducer = delegate void(double[] buf) {
+                    MPI_Allreduce(MPI_IN_PLACE, buf.ptr, to!int(buf.length),
+                                  MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+                };
+            }
+            double[] qsol;
+            double[] phisol;
+            schurSolve(solveA0, Uc, Wt, Lmat, b, cvec, phisol, qsol, reducer);
+            foreach (i; 0 .. N) phi[i] = phisol[i];
+            // Every rank solved the same tiny K x K system redundantly, so all ranks
+            // now hold identical q. Store it for the next solve's Velectrode_at().
+            circuit.setQ(qsol);
+            // Diagnostic on the first few solves: a circuit that is mis-assembled
+            // usually shows up here as q far from the nominal node voltages, long
+            // before the flow solver reports trouble.
+            if (circuit_solve_count < 3) {
+                writef("  [efield/circuit] solve %d:", circuit_solve_count);
+                foreach (m; 0 .. K) writef(" q[%d]=%.6g", m, qsol[m]);
+                double pmin = phi[0], pmax = phi[0];
+                foreach (i; 0 .. N) { if (phi[i] < pmin) pmin = phi[i]; if (phi[i] > pmax) pmax = phi[i]; }
+                writefln("   phi in [%.6g, %.6g]", pmin, pmax);
+                circuit_solve_count++;
+            }
+            if (verbose) {
+                writef("    circuit node potentials:");
+                foreach (m; 0 .. K) writef(" q[%d]=%.6g", m, qsol[m]);
+                writeln();
+            }
+        }
 
         // Unpack the solution into the "electric_potential" members stored in the cells
         size_t i = 0;
@@ -783,6 +913,10 @@ private:
 
     GMResFieldSolver gmres;
     ConductivityModel conductivity;
+    ExternalCircuit circuit;      // null => no circuit; the ordinary code path
+    double[][] Uc, Wt;            // [K][N] border blocks of the augmented system
+    double[] Lmat, cvec;          // K*K row-major, and length K
+    int circuit_solve_count = 0;
     FieldBC[][] field_bcs;
     int[] block_offsets; // FIXME: Badness with the block id's not matching their order in local fluid blocks
     bool[] zng_layer;    // cells with one-sided (non-interior) ZNG stencil families; Hall is gated off on their faces

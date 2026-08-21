@@ -69,11 +69,6 @@ class ElectricField {
         // External circuit (Path 1). Null unless config.external_circuit declares
         // nodes, in which case every solve takes the augmented-system path below.
         circuit = create_external_circuit(GlobalConfig.external_circuit);
-        if (circuit !is null) {
-            string why;
-            if (!circuit.isGrounded(why))
-                throw new Error("external_circuit is not solvable: " ~ why);
-        }
 
         field_bcs.length = localFluidBlocks.length;
         foreach(i, block; localFluidBlocks){
@@ -81,6 +76,34 @@ class ElectricField {
             foreach(j, bc; block.bc){
                 field_bcs[i][j] = create_field_bc(bc.field_bc, bc, block_offsets, conductivity_model_name, N, circuit);
             }
+        }
+
+        // Solvability of the augmented system. Deferred until AFTER the BCs exist,
+        // because a node with no resistive path to a supply is still well-posed if it
+        // carries electrode faces -- the sheath conductance ties it to the plasma (see
+        // ExternalCircuit.isGrounded). That is the physical Hall topology: intermediate
+        // segment pairs float, isolated by design from both the supply and each other.
+        if (circuit !is null) {
+            auto nfaces = new size_t[circuit.nnodes];
+            nfaces[] = 0;
+            foreach(i, block; localFluidBlocks){
+                foreach(j, bc; block.bc){
+                    auto celec = cast(CircuitElectrode) field_bcs[i][j];
+                    if (celec is null) continue;
+                    foreach (f; bc.faces) if (celec.is_electrode(f)) nfaces[celec.nodeId()] += 1;
+                }
+            }
+            version(mpi_parallel){
+                // A node's faces can live entirely on another rank, so the count that
+                // decides solvability must be the global one.
+                auto tmp = new long[nfaces.length];
+                foreach (m, v; nfaces) tmp[m] = cast(long) v;
+                MPI_Allreduce(MPI_IN_PLACE, tmp.ptr, cast(int) tmp.length, MPI_LONG, MPI_SUM, MPI_COMM_WORLD);
+                foreach (m, v; tmp) nfaces[m] = cast(size_t) v;
+            }
+            string why;
+            if (!circuit.isGrounded(why, nfaces))
+                throw new Error("external_circuit is not solvable: " ~ why);
         }
 
         version(mpi_parallel){

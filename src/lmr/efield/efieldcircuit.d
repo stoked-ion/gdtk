@@ -144,9 +144,46 @@ class ExternalCircuit {
 
         Returns true if every node can reach a supply leg through the resistor graph.
     */
-    bool isGrounded(ref string report) const {
+    /*
+        Solvability of the augmented system.
+
+        A node's potential q_m is determined if its Schur-complement row has a
+        non-trivial diagonal. Two independent mechanisms supply one:
+
+          (i)  the RESISTOR NETWORK -- a path of resistors from the node to a leg
+               that terminates on a fixed supply, contributing +1/R to L[m,m];
+          (ii) the PLASMA -- any electrode face on the node stamps
+               L[m,m] += -S*Jp through sheathFaceStamp, i.e. the sheath's
+               differential conductance ties the metal potential to the adjacent
+               cell potential.
+
+        Mechanism (ii) is what makes a FLOATING electrode pair well-posed, and it
+        is essential for the physical Hall connection: intermediate segment pairs
+        are deliberately isolated from each other and from the supply (that is what
+        segmentation MEANS -- see the note in Sec. 2.6 of the Path 1 plan), and each
+        such pair simply floats to the potential at which its net sheath current is
+        zero. Requiring a resistive path to a supply for EVERY node -- as this check
+        originally did -- would have rejected exactly the topology the Hall case
+        needs.
+
+        What is still genuinely required is at least ONE supply leg somewhere in the
+        circuit. Without it, nothing anchors the absolute level: the sheath stamps
+        are all differences (phi_cell - q_m), so adding a constant to every phi and
+        every q leaves the whole augmented system unchanged, and it is singular.
+
+        `electrodeFaceCount[m]` must be the GLOBAL count over all MPI ranks -- a
+        node's faces can live entirely on another rank.
+    */
+    bool isGrounded(ref string report, const(size_t)[] electrodeFaceCount = null) const {
         immutable size_t K = nodes.length;
         if (K == 0) { report = "circuit has no nodes"; return false; }
+        bool anySupply = false;
+        foreach (r; resistors) if (r.b < 0) { anySupply = true; break; }
+        if (!anySupply) {
+            report = "circuit has no supply leg; every node potential is defined only "
+                   ~ "up to a common additive constant and the augmented system is singular";
+            return false;
+        }
         auto seen = new bool[K];
         int[] stack;
         foreach (r; resistors) if (r.b < 0 && !seen[r.a]) { seen[r.a] = true; stack ~= r.a; }
@@ -161,12 +198,13 @@ class ExternalCircuit {
             }
         }
         foreach (i, s; seen) {
-            if (!s) {
-                report = format("circuit node %d (%s) has no resistive path to any supply leg; "
-                                ~ "the network is floating and its potential is undetermined",
-                                i, nodes[i].label);
-                return false;
-            }
+            if (s) continue;
+            if (electrodeFaceCount !is null && i < electrodeFaceCount.length
+                && electrodeFaceCount[i] > 0) continue; // tied to the plasma by its sheath
+            report = format("circuit node %d (%s) has neither a resistive path to a supply leg "
+                            ~ "nor any electrode face; its potential is undetermined",
+                            i, nodes[i].label);
+            return false;
         }
         report = "";
         return true;
@@ -492,6 +530,51 @@ unittest {
     // and once bridged, it should pass
     ck.addResistor(a, b, 2.0);
     assert(ck.isGrounded(rep), "bridging to a grounded node should satisfy the check");
+}
+
+/*
+    The Hall topology: an electrode pair that is isolated from BOTH the supply and
+    every other node is still well-posed, because its own sheath faces stamp
+    L[m,m] += -S*Jp. This is the case the original network-only check wrongly
+    rejected, and it is exactly the intermediate segment pair of a segmented Hall
+    channel. Pinned here so a future tightening of isGrounded cannot silently break
+    the Hall case.
+*/
+unittest {
+    auto ck = new ExternalCircuit();
+    int a = ck.addNode(400.0, "end_driven");
+    int f = ck.addNode(200.0, "mid_floating");
+    ck.addSupplyLeg(a, 1.0e-3, 400.0);
+    string rep;
+    // With no face information, the floating node cannot be justified.
+    assert(!ck.isGrounded(rep), "floating node with no faces must still be rejected");
+    // Given electrode faces on it, it IS determined -- by the plasma, not the network.
+    size_t[] nf = [10, 10];
+    assert(ck.isGrounded(rep, nf),
+           "a floating node carrying electrode faces is tied to the plasma by its sheath");
+    // ... but a node with neither a path nor faces is not.
+    size_t[] nf_none = [10, 0];
+    assert(!ck.isGrounded(rep, nf_none), "no path and no faces => undetermined");
+    assert(rep.canFind("mid_floating"), "report should name the offending node");
+}
+
+/*
+    At least one supply leg is required no matter how many faces exist: the sheath
+    stamps depend only on (phi_cell - q_m), so a circuit with no supply leaves the
+    whole augmented system invariant under a uniform shift of phi and q. Adding
+    faces must NOT be able to paper over that -- checked explicitly, because the
+    face-count relaxation above is precisely the kind of change that could.
+*/
+unittest {
+    auto ck = new ExternalCircuit();
+    int a = ck.addNode(0.0, "n0");
+    int b = ck.addNode(0.0, "n1");
+    ck.addResistor(a, b, 1.0e-3);   // nodes tied to each other, but to no supply
+    string rep;
+    size_t[] nf = [100, 100];
+    assert(!ck.isGrounded(rep, nf),
+           "a supply-free circuit is gauge-singular however many faces it carries");
+    assert(rep.canFind("supply"), "report should identify the missing supply leg");
 }
 
 // Guard rails: bad input should fail loudly at construction, not produce a silently

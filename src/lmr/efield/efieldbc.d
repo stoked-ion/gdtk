@@ -237,12 +237,13 @@ class CircuitElectrode : FieldBC {
     Two electrode groups wired together simply name the SAME node id; that shared id
     IS the short, and the Kirchhoff row for that node is what limits the current.
 
-    PHASE 1 NOTE: this class is not yet consulted by the matrix assembly in efield.d.
-    Constructing a case with it will currently behave as an insulator, because
-    efield.d's assembly branches on `cast(SheathField)` and does not yet know about
-    this type. Wiring it in is Phase 2, together with the Woodbury solve of the
-    augmented system. It is added here first so the data structures and the Lua
-    plumbing can be built and tested independently of the solver change.
+    The assembly in efield.d branches on this type and routes the sheath linearization
+    through sheathFaceStamp (efieldcircuit.d), which is the single place the augmented
+    system's sign convention lives; the augmented system is then solved by the
+    Woodbury/Schur path in the same module. Verified two ways: the stamps reduce to
+    SheathField's own (a_diag, b_rhs) when the node is frozen (unit tests in
+    efieldcircuit.d), and a whole case re-expressed with one node per electrode and
+    R -> 0 reproduces the SheathField result to 0.05% in F_x and total current.
 */
     this(ExternalCircuit circuit, int node_id, SheathModel model,
          double segment_pitch=0.0, double segment_fill=1.0, double segment_x0=0.0) {

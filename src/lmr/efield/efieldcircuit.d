@@ -212,6 +212,116 @@ private:
     double[] _q;
 }
 
+/*
+    THE SIGN CONVENTION, IN ONE PLACE.
+
+    Every contribution the external circuit makes to the augmented system comes
+    through this one function. efield.d calls it during assembly; the unit tests
+    below call the SAME function and check it against an independent dense solve.
+    If the convention is wrong, the tests fail -- it cannot drift out of agreement
+    with the code that uses it, because there is only one copy.
+
+    Augmented system (NO minus folded into Uc, so there is no sign to misremember):
+
+        [ A0  Uc ] [ phi ]   [ b0 ]
+        [ Wt  L  ] [  q  ] = [ c  ]
+
+    For one sheath face of area S on cell k belonging to circuit node m, with the
+    sheath law linearized about the frozen prior iterate (phi_star, q_star):
+
+        J(phi_k, q_m) ~= J0 + Jp*(phi_k - phi_star) - Jp*(q_m - q_star)
+
+    The face contributes -S*J to cell k's charge balance, and +S*J to node m's
+    Kirchhoff sum (the same current leaves the plasma and enters the electrode, so
+    the two rows see equal and opposite contributions).
+
+    Matching coefficients gives the six stamps below. The `const` term is the piece
+    that is easy to drop: without its +S*Jp*q_star part the cell row does NOT reduce
+    to SheathField.linearized_robin when q_m is frozen, which unittest
+    `circuit stamp reduces to SheathField when the node is frozen` checks directly.
+*/
+void sheathFaceStamp(double S, double J0, double Jp, double phi_star, double q_star,
+                     out double a_diag,  // -> A0[k,k]
+                     out double u_coeff, // -> Uc[k,m]
+                     out double b_cell,  // -> b0[k]
+                     out double wt_coeff,// -> Wt[m,k]
+                     out double l_diag,  // -> L[m,m]
+                     out double c_node)  // -> c[m]
+{
+    immutable double konst = S*(J0 - Jp*phi_star + Jp*q_star);
+    a_diag   = -S*Jp;
+    u_coeff  =  S*Jp;
+    b_cell   = -konst;
+    wt_coeff = -S*Jp;
+    l_diag   =  S*Jp;
+    c_node   =  konst;
+}
+
+/*
+    The Schur/Woodbury solve of the augmented system.
+
+    A0 is never modified and never combined with L -- that is the whole point. The
+    caller supplies `solveA0`, a delegate that solves A0*x = rhs (GMRES + ILU(0) in
+    efield.d; a dense factorization in the unit tests). This keeps the algebra
+    testable without the fluid solver, and means the tested code path is literally
+    the one that runs in production.
+
+        X  = A0^-1 Uc                (K solves)
+        y0 = A0^-1 b0                (1 solve -- exactly today's field solve)
+        S  = L - Wt X                (K x K, dense, tiny)
+        q  = S^-1 (c - Wt y0)
+        phi= y0 - X q
+
+    Cost: K+1 solves of the unmodified system, plus one K x K dense solve.
+
+    Note on conditioning (measured, see tools/woodbury/README.md): cond(A0) and
+    cond(S) stay O(1e2) even as supply resistances go to zero, while the COMBINED
+    (N+K)x(N+K) matrix reaches 1e13. Because this routine never forms that combined
+    matrix, it is the better-conditioned formulation, not merely the cheaper one.
+*/
+void schurSolve(double[] delegate(const(double)[]) solveA0,
+                const double[][] Uc,      // [K][N] -- column m of Uc as Uc[m]
+                const double[][] Wt,      // [K][N]
+                const double[] L,         // K*K row-major
+                const double[] b0,        // N
+                const double[] c,         // K
+                ref double[] phi,         // out, N
+                ref double[] q)           // out, K
+{
+    import nm.bbla : Matrix, gaussJordanElimination;
+    immutable size_t K = Uc.length;
+    immutable size_t N = b0.length;
+
+    // X's columns, one solve of the untouched system each
+    double[][] X; X.length = K;
+    foreach (m; 0 .. K) X[m] = solveA0(Uc[m]).dup;
+    double[] y0 = solveA0(b0).dup;
+
+    // Schur complement and its RHS. Caller must have already reduced Uc/Wt/L/c
+    // across MPI ranks if the problem is distributed.
+    auto Aug = new Matrix!double(K, K+1);
+    foreach (i; 0 .. K) {
+        foreach (j; 0 .. K) {
+            double wtx = 0.0;
+            foreach (n; 0 .. N) wtx += Wt[i][n]*X[j][n];
+            Aug[i, j] = L[i*K + j] - wtx;
+        }
+        double wty = 0.0;
+        foreach (n; 0 .. N) wty += Wt[i][n]*y0[n];
+        Aug[i, K] = c[i] - wty;
+    }
+    gaussJordanElimination!double(Aug);
+
+    q.length = K;
+    foreach (i; 0 .. K) q[i] = Aug[i, K];
+    phi.length = N;
+    foreach (n; 0 .. N) {
+        double xq = 0.0;
+        foreach (m; 0 .. K) xq += X[m][n]*q[m];
+        phi[n] = y0[n] - xq;
+    }
+}
+
 version(unittest) {
     import std.stdio;
     import std.math : abs, isClose;
@@ -329,4 +439,156 @@ unittest {
     threw = false;
     try { ck.setQ([1.0, 2.0]); } catch (Error e) { threw = true; }
     assert(threw, "setQ with wrong length must throw");
+}
+
+// ---------------------------------------------------------------------------
+// Convention verification.
+//
+// These tests exist specifically to make the sign convention FALSIFIABLE rather
+// than merely documented. They call sheathFaceStamp and schurSolve -- the same
+// functions efield.d calls -- and check them against an independent dense solve
+// of the full augmented system. A convention error cannot pass them.
+// ---------------------------------------------------------------------------
+
+// Identity 1: with the node frozen, the cell row must reduce EXACTLY to
+// SheathField.linearized_robin (a_diag = -S*Jp, b_rhs = S*(J0 - Jp*phi)).
+// This is what guarantees the R->0 degeneracy test can pass at all.
+unittest {
+    immutable double S = 1.7, J0 = -0.35, Jp = 0.82, phi_star = 3.1, q_star = 411.0;
+    double a_diag, u_coeff, b_cell, wt_coeff, l_diag, c_node;
+    sheathFaceStamp(S, J0, Jp, phi_star, q_star,
+                    a_diag, u_coeff, b_cell, wt_coeff, l_diag, c_node);
+
+    // SheathField's stamps, for the same face with Velectrode = q_star:
+    immutable double old_a_diag = -S*Jp;
+    immutable double old_b_rhs  =  S*(J0 - Jp*phi_star);
+    // efield.d assembles SheathField as: A[k,k] += a_diag; b[k] += b_rhs.
+    // The circuit path assembles: A0[k,k] += a_diag; b0[k] += b_cell; and the q
+    // column contributes u_coeff*q. Freezing q at q_star must give the same row.
+    immutable double phi_probe = 2.4;
+    immutable double circuit_row = a_diag*phi_probe + u_coeff*q_star - (-b_cell);
+    immutable double sheath_row  = old_a_diag*phi_probe - old_b_rhs;
+    assert(abs(circuit_row - sheath_row) < 1.0e-12,
+           "circuit stamp must reduce to SheathField when the node is frozen");
+
+    // and both must equal the physical -S*J(dV) at the frozen point
+    immutable double dV = phi_probe - q_star;
+    immutable double J_lin = J0 + Jp*((dV) - (phi_star - q_star));
+    assert(abs(circuit_row - (-S*J_lin)) < 1.0e-12,
+           "circuit stamp must represent -S*J_lin");
+}
+
+// Identity 2: the cell and node rows must see equal and opposite plasma current
+// (the same current leaves the plasma and enters the electrode). A transposition
+// slip that made them the same sign would violate charge conservation.
+unittest {
+    double a_diag, u_coeff, b_cell, wt_coeff, l_diag, c_node;
+    sheathFaceStamp(2.0, 0.5, 1.25, 1.0, 7.0,
+                    a_diag, u_coeff, b_cell, wt_coeff, l_diag, c_node);
+    assert(abs(a_diag + l_diag)  < 1.0e-14, "A0 diagonal and L diagonal must be opposite");
+    assert(abs(u_coeff + wt_coeff) < 1.0e-14, "Uc and Wt entries must be opposite");
+    assert(abs(b_cell + c_node)  < 1.0e-14, "b0 and c constants must be opposite");
+}
+
+version(unittest) {
+    // Dense reference: assemble and solve the full (N+K)x(N+K) augmented system.
+    private void denseAugmentedSolve(const double[] A0, const double[][] Uc,
+                                     const double[][] Wt, const double[] L,
+                                     const double[] b0, const double[] c,
+                                     size_t N, size_t K,
+                                     ref double[] phi, ref double[] q)
+    {
+        import nm.bbla : Matrix, gaussJordanElimination;
+        auto M = new Matrix!double(N+K, N+K+1);
+        foreach (i; 0 .. N+K) foreach (j; 0 .. N+K+1) M[i, j] = 0.0;
+        foreach (i; 0 .. N) foreach (j; 0 .. N) M[i, j] = A0[i*N + j];
+        foreach (i; 0 .. N) foreach (m; 0 .. K) M[i, N+m] = Uc[m][i];
+        foreach (m; 0 .. K) foreach (j; 0 .. N) M[N+m, j] = Wt[m][j];
+        foreach (m; 0 .. K) foreach (n; 0 .. K) M[N+m, N+n] = L[m*K + n];
+        foreach (i; 0 .. N) M[i, N+K] = b0[i];
+        foreach (m; 0 .. K) M[N+m, N+K] = c[m];
+        gaussJordanElimination!double(M);
+        phi.length = N; q.length = K;
+        foreach (i; 0 .. N) phi[i] = M[i, N+K];
+        foreach (m; 0 .. K) q[m] = M[N+m, N+K];
+    }
+
+    // Dense solve of A0 alone, to stand in for GMRES in schurSolve.
+    private double[] denseSolveA0(const double[] A0, size_t N, const(double)[] rhs) {
+        import nm.bbla : Matrix, gaussJordanElimination;
+        auto M = new Matrix!double(N, N+1);
+        foreach (i; 0 .. N) {
+            foreach (j; 0 .. N) M[i, j] = A0[i*N + j];
+            M[i, N] = rhs[i];
+        }
+        gaussJordanElimination!double(M);
+        auto x = new double[N];
+        foreach (i; 0 .. N) x[i] = M[i, N];
+        return x;
+    }
+}
+
+// Identity 3 (the decisive one): Woodbury/Schur must agree with a direct dense
+// solve of the full augmented system, on a problem built with the SAME stamp
+// function efield.d uses. This is the D-side twin of tools/woodbury/woodbury_check.py.
+unittest {
+    // A small 1D chain of cells with a Dirichlet anchor at one end and two
+    // sheath-coupled electrodes at the other, tied to 2 circuit nodes.
+    immutable size_t n = 6, K = 2;
+    immutable size_t N = n;
+    auto A0 = new double[N*N]; A0[] = 0.0;
+    auto b0 = new double[N];   b0[] = 0.0;
+    double[][] Uc; Uc.length = K; foreach (m; 0 .. K) { Uc[m] = new double[N]; Uc[m][] = 0.0; }
+    double[][] Wt; Wt.length = K; foreach (m; 0 .. K) { Wt[m] = new double[N]; Wt[m][] = 0.0; }
+    auto L = new double[K*K]; L[] = 0.0;
+    auto c = new double[K];   c[] = 0.0;
+
+    // conduction
+    foreach (i; 0 .. N) {
+        if (i > 0)   { A0[i*N + i] += 1.3; A0[i*N + i-1] -= 1.3; }
+        if (i+1 < N) { A0[i*N + i] += 1.3; A0[i*N + i+1] -= 1.3; }
+    }
+    // Dirichlet anchor at cell 0
+    foreach (j; 0 .. N) A0[0*N + j] = 0.0;
+    A0[0] = 1.0; b0[0] = 12.0;
+
+    // two electrode faces on the last two cells, one per node
+    immutable double[2] Sf   = [1.1, 0.9];
+    immutable double[2] J0f  = [0.4, -0.25];
+    immutable double[2] Jpf  = [0.65, 0.9];
+    immutable double[2] phis = [2.0, 2.5];
+    immutable double[2] qs   = [30.0, -10.0];
+    foreach (t; 0 .. 2) {
+        size_t k = N-1-t; size_t m = t;
+        double ad, uc, bc, wt, ld, cn;
+        sheathFaceStamp(Sf[t], J0f[t], Jpf[t], phis[t], qs[t], ad, uc, bc, wt, ld, cn);
+        A0[k*N + k] += ad;
+        Uc[m][k]    += uc;
+        b0[k]       += bc;
+        Wt[m][k]    += wt;
+        L[m*K + m]  += ld;
+        c[m]        += cn;
+    }
+    // external network: a bus between the nodes and a supply leg on each
+    auto ck = new ExternalCircuit();
+    ck.addNode(30.0, "n0"); ck.addNode(-10.0, "n1");
+    ck.addResistor(0, 1, 0.4);
+    ck.addSupplyLeg(0, 1.5, 30.0);
+    ck.addSupplyLeg(1, 2.5, -10.0);
+    double[] Lnet, cnet;
+    ck.assemble_L_and_c(Lnet, cnet);
+    foreach (i; 0 .. K*K) L[i] += Lnet[i];
+    foreach (i; 0 .. K)   c[i] += cnet[i];
+
+    double[] phi_d, q_d, phi_w, q_w;
+    denseAugmentedSolve(A0, Uc, Wt, L, b0, c, N, K, phi_d, q_d);
+    auto solver = delegate double[](const(double)[] rhs) { return denseSolveA0(A0, N, rhs); };
+    schurSolve(solver, Uc, Wt, L, b0, c, phi_w, q_w);
+
+    foreach (i; 0 .. N)
+        assert(abs(phi_d[i] - phi_w[i]) < 1.0e-9,
+               format("phi[%d]: dense %g vs woodbury %g", i, phi_d[i], phi_w[i]));
+    foreach (m; 0 .. K)
+        assert(abs(q_d[m] - q_w[m]) < 1.0e-9,
+               format("q[%d]: dense %g vs woodbury %g", m, q_d[m], q_w[m]));
 }

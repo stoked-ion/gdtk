@@ -12,6 +12,7 @@ import std.conv;
 import std.format;
 import std.math;
 import std.stdio;
+import std.process : environment;
 version(mpi_parallel){
     import mpi;
 }
@@ -62,6 +63,14 @@ class ElectricField {
         phi0.length = N;
         auto gmodel = GlobalConfig.gmodel_master;
         conductivity = create_conductivity_model(conductivity_model_name, gmodel);
+        // Hall discretisationselected via environment so both schemes live in one binary.
+        // DEFAULT = central, i.e. the scheme every established result in this project was
+        // produced with. The Path 2 upwind split is opt-in via LMR_HALL_SCHEME=upwind
+        // until it is validated on a real case; see the Path 2 notes in
+        // tools/hall-stencil/. This keeps the committed default bit-identical.
+        hall_scheme_central = (environment.get("LMR_HALL_SCHEME", "central") != "upwind");
+        if (GlobalConfig.is_master_task)
+            writefln("  [efield/hall] scheme = %s", hall_scheme_central ? "central (original)" : "upwind (Path 2)");
 
         // I don't want random bits of the field module hanging off the boundary conditions.
         // Doing it this way is bad encapsulation, but it makes sure that other people only break my code
@@ -135,10 +144,207 @@ class ElectricField {
         return;
     }
 
+    /*
+        Build the vertex-averaged Hall conductivity field used by the conservative Hall
+        convection term (Path 2).
+
+        WHY VERTICES. Splitting the tensor sigma_t = sigma_S + sigma_SS (Parent, Shneider
+        & Macheret, JCP 230 (2011) 1439-1453, Eqs. 39-42), the skew part contributes a
+        face flux S*sigma_H*(t . grad phi) with t = (n_y, -n_x) -- the TANGENTIAL
+        derivative of phi along the face. Integrating by parts around the closed cell
+        boundary (the [sigma_H*phi] bracket vanishes because the contour is closed):
+
+            contour_int sigma_H (t.grad phi) dS = - contour_int phi (t.grad sigma_H) dS
+
+        and t.grad sigma_H = (-d sigma_H/dy, +d sigma_H/dx) . n = a.n, which is exactly
+        Parent's Eq. (41) convection speed. So the Hall term is a CONVECTIVE flux in phi,
+        not a diffusive flux in grad phi -- see tools/hall-stencil/fluxform.py, which
+        verifies this against the paper's own test cases (the centred form undershoots
+        their 10-40 V boundary range by 26 V; this form is exactly monotone).
+
+        The face integral of a.n then telescopes to a difference of sigma_H at the face's
+        two ENDPOINTS:
+
+            S*(a.n) = integral_face (t . grad sigma_H) dS = sigma_H(v_end) - sigma_H(v_start)
+
+        with v_start -> v_end running along +t. Two properties follow, and they are the
+        whole point of the change:
+
+          1. SINGLE-VALUED. Both cells sharing a face use the same two vertex values and
+             opposite n (hence opposite t), so their contributions are exactly equal and
+             opposite. The old form needed a tangential GRADIENT reconstructed from each
+             cell's own stencil, so the two sides disagreed wherever the stencil family
+             changed -- the "discrete curl" defect this module's comments record.
+          2. DIVERGENCE-FREE TO MACHINE PRECISION. Summing around a closed cell, each
+             vertex appears once as a start and once as an end, so the sum telescopes to
+             exactly zero. Analytically div(a) = -d2(sigma_H)/dxdy + d2(sigma_H)/dydx = 0;
+             here that identity survives discretisation exactly, so a uniform phi produces
+             exactly zero net current regardless of the sigma field.
+
+        Vertex values are the unweighted mean of the cells meeting at the vertex. At a
+        BLOCK JOIN the remote cells are included via the halo (below), so both blocks
+        average the same set and property 1 still holds across the join -- without that,
+        the two sides would compute different vertex values and the flux would be
+        two-valued at exactly the 7 joins of a typical X2 channel.
+    */
+    void computeHallVertexField(FluidBlock[] localFluidBlocks) {
+        auto gmodel = GlobalConfig.gmodel_master;
+        double Bz_app = GlobalConfig.applied_Bz;
+        bool hall_on = GlobalConfig.electric_field_hall_effect && (Bz_app != 0.0);
+
+        if (sigmaH_cell.length != N) sigmaH_cell.length = N;
+        sigmaH_cell[] = 0.0;
+        if (sigmaH_vtx.length != localFluidBlocks.length) sigmaH_vtx.length = localFluidBlocks.length;
+
+        if (!hall_on) {
+            // Leave every vertex value at zero: a.n is then identically zero and the
+            // convection term vanishes, recovering the scalar-sigma path exactly.
+            foreach(i, block; localFluidBlocks){
+                if (sigmaH_vtx[i].length != block.vertices.length) sigmaH_vtx[i].length = block.vertices.length;
+                sigmaH_vtx[i][] = 0.0;
+            }
+            return;
+        }
+
+        // 1. sigma_H at cell centres.
+        foreach(blkid, block; localFluidBlocks){
+            foreach(cell; block.cells){
+                int k = cell.id + block_offsets[blkid];
+                double sig = conductivity(cell.fs.gas, cell.pos[0], gmodel).re;
+                double beta = conductivity.hall_beta(cell.fs.gas, gmodel, Bz_app);
+                sigmaH_cell[k] = sig*beta/(1.0 + beta*beta);
+            }
+        }
+
+        // 2. Halo: the remote cells just across each shared block boundary. The
+        //    exchanger already knows the mapping (it is the same one used for phi in the
+        //    matrix-vector product), so we borrow it and copy the result out before the
+        //    linear solve overwrites the buffer with phi data.
+        version(mpi_parallel){
+            exchanger.update_buffers(sigmaH_cell);
+            if (sigmaH_halo.length != exchanger.external_cell_buffer.length)
+                sigmaH_halo.length = exchanger.external_cell_buffer.length;
+            sigmaH_halo[] = exchanger.external_cell_buffer[];
+        }
+
+        // 3. Scatter cell values to vertices, then divide by the count.
+        foreach(blkid, block; localFluidBlocks){
+            if (sigmaH_vtx[blkid].length != block.vertices.length)
+                sigmaH_vtx[blkid].length = block.vertices.length;
+            sigmaH_vtx[blkid][] = 0.0;
+            auto count = new double[block.vertices.length];
+            count[] = 0.0;
+
+            foreach(cell; block.cells){
+                int k = cell.id + block_offsets[blkid];
+                foreach(v; cell.vtx){
+                    sigmaH_vtx[blkid][v.id] += sigmaH_cell[k];
+                    count[v.id] += 1.0;
+                }
+            }
+            // Remote contributions at shared boundaries, so a join vertex sees the same
+            // set of cells from both sides.
+            foreach(j, bc; block.bc){
+                auto field_bc = field_bcs[blkid][j];
+                if (!field_bc.isShared) continue;
+                foreach(face; bc.faces){
+                    int oid = field_bc.other_id(face);
+                    double sH;
+                    if (oid < N) {
+                        sH = sigmaH_cell[oid];
+                    } else {
+                        version(mpi_parallel){
+                            size_t h = oid - N;
+                            if (h >= sigmaH_halo.length) continue;
+                            sH = sigmaH_halo[h];
+                        } else {
+                            continue;
+                        }
+                    }
+                    foreach(v; face.vtx){
+                        sigmaH_vtx[blkid][v.id] += sH;
+                        count[v.id] += 1.0;
+                    }
+                }
+            }
+            foreach(vi; 0 .. block.vertices.length){
+                if (count[vi] > 0.0) sigmaH_vtx[blkid][vi] /= count[vi];
+            }
+        }
+
+        // Raw field values, printed unconditionally on the first solve: if sigma_H is
+        // flat the whole Hall term is inert and every downstream number is meaningless.
+        if (hall_rowsum_reports == 0) {
+            double lo = 1.0e300, hi = -1.0e300;
+            size_t nv = 0;
+            foreach(blkid, block; localFluidBlocks){
+                nv += block.vertices.length;
+                foreach(cell; block.cells){
+                    double v = sigmaH_cell[cell.id + block_offsets[blkid]];
+                    if (v < lo) lo = v;
+                    if (v > hi) hi = v;
+                }
+            }
+            if (GlobalConfig.is_master_task) {
+                writefln("  [efield/hall] hall_on=%s  sigma_H(cell) in [%.4g, %.4g]  nvtx=%d",
+                         hall_on, lo, hi, nv);
+                stdout.flush();
+            }
+        }
+
+        // PURE TELESCOPING CHECK. Independent of the rest of the assembly: for every
+        // cell, sum S*(a.n) over ALL its faces. Each vertex is the "end" of one face and
+        // the "start" of the next, so the sum must vanish to round-off. If it does not,
+        // a uniform potential manufactures current and nothing downstream can be trusted.
+        if (hall_rowsum_reports < 3) {
+            double worst = 0.0, scale = 0.0;
+            foreach(blkid, block; localFluidBlocks){
+                foreach(cell; block.cells){
+                    double sum = 0.0, mag = 0.0;
+                    foreach(io, face; cell.iface){
+                        if (face.vtx.length != 2) continue;
+                        double nxf = cell.outsign[io]*face.n.x.re;
+                        double nyf = cell.outsign[io]*face.n.y.re;
+                        double tx = nyf, ty = -nxf;
+                        auto v0 = face.vtx[0]; auto v1 = face.vtx[1];
+                        double along = (v1.pos[0].x.re - v0.pos[0].x.re)*tx
+                                     + (v1.pos[0].y.re - v0.pos[0].y.re)*ty;
+                        double sH0 = sigmaH_vtx[blkid][v0.id];
+                        double sH1 = sigmaH_vtx[blkid][v1.id];
+                        double San = (along >= 0.0) ? (sH1 - sH0) : (sH0 - sH1);
+                        sum += San; mag += fabs(San);
+                    }
+                    if (fabs(sum) > worst) { worst = fabs(sum); scale = mag; }
+                }
+            }
+            version(mpi_parallel){
+                double[2] loc = [worst, scale]; double[2] glb;
+                MPI_Allreduce(loc.ptr, glb.ptr, 2, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
+                worst = glb[0]; scale = glb[1];
+            }
+            // Only report once sigma_H actually varies. On the first solves the flow is
+            // still uniform, every vertex difference is zero, and the check is vacuous --
+            // it would otherwise burn all three reports before the flow develops.
+            if (scale > 0.0) {
+                if (GlobalConfig.is_master_task) {
+                    writefln("  [efield/hall] telescoping |sum_faces S*(a.n)| = %.3e "
+                             ~ "(scale %.3e, relative %.3e)",
+                             worst, scale, worst/scale);
+                    stdout.flush();
+                }
+                hall_rowsum_reports += 1;
+            }
+        }
+    }
+
     void solve_efield(FluidBlock[] localFluidBlocks, bool verbose) {
         A[] = 0.0;
         b[] = 0.0;
         Ai[] = -1;
+
+        // Hall convection field (Path 2). Must run before the assembly, and before the
+        // linear solve, which reuses the exchanger's buffer for phi.
+        computeHallVertexField(localFluidBlocks);
 
         // Border blocks of the augmented system (Path 1). Only touched when a
         // circuit is present; otherwise everything below is exactly as before.
@@ -348,15 +554,75 @@ class ElectricField {
                     // hence the partner-cell lookup. Remote partners across block
                     // boundaries are assumed interior: ZNG layers normally sit at domain
                     // ends, not at block joins.
-                    if (hall_face && zng_layer[k]) hall_face = false;
-                    if (hall_face && !face.is_on_boundary) {
-                        auto pcell = (face.left_cell is cell) ? face.right_cell : face.left_cell;
-                        if (zng_layer[pcell.id + block_offsets[blkid]]) hall_face = false;
+                    // The ZNG conservation gate. It exists because the CENTRAL
+                    // tangential-gradient Hall flux is a discrete curl whose defect
+                    // concentrates where the stencil family changes, and gating it there
+                    // measured ~50x better in level error. It is retained EXACTLY as it was
+                    // for the central scheme.
+                    //
+                    // It is deliberately NOT applied under the Path 2 upwind split, where it
+                    // would be actively harmful: that scheme's exactness rests on
+                    // sum_faces S*(a.n) = 0 around each cell, which telescopes only if EVERY
+                    // face contributes, and gating any face leaves a residue that drives a
+                    // spurious current under a uniform phi.
+                    if (hall_scheme_central) {
+                        if (hall_face && zng_layer[k]) hall_face = false;
+                        if (hall_face && !face.is_on_boundary) {
+                            auto pcell = (face.left_cell is cell) ? face.right_cell : face.left_cell;
+                            if (zng_layer[pcell.id + block_offsets[blkid]]) hall_face = false;
+                        }
                     }
-                    double beta = (hall_face) ? conductivity.hall_beta(face.fs.gas, gmodel, Bz_app) : 0.0;
+                    // The PHYSICAL Hall parameter, never gated. beta sets the Pedersen
+                    // conductivity sigma_P = sigma/(1+beta^2), which is a property of the
+                    // magnetised plasma and applies on every face including walls; only the
+                    // Hall ROTATION (the tangential/convective part) is a discretisation
+                    // choice that may be gated.
+                    //
+                    // The old code folded both into one gated beta, so a gated face silently
+                    // reverted to the UNMAGNETISED sigma. With the full tensor that was a
+                    // factor |m| = sigma/sqrt(1+beta^2) -> sigma, i.e. ~15x at beta=15. After
+                    // the Path 2 split the symmetric part alone is sigma/(1+beta^2), so the
+                    // same gate becomes a ~226x conductivity jump at exactly the electrode
+                    // walls -- which is what blew C6_pow up one step after switch-on.
+                    // CENTRAL keeps the original single gated beta, so its results are
+                    // bit-identical to every established run. UPWIND separates the two roles:
+                    // beta sets the Pedersen conductivity sigma_P = sigma/(1+beta^2), a
+                    // physical property that applies on every face including walls, while
+                    // beta_rot (gated) drives only the tensor rotation. Folding both into one
+                    // gated beta means a gated face silently reverts to the UNMAGNETISED
+                    // sigma -- a factor 1+beta^2 (~226 at beta=15) once the tensor is split.
+                    double beta_full = conductivity.hall_beta(face.fs.gas, gmodel, Bz_app);
+                    double beta     = hall_scheme_central ? ((hall_face) ? beta_full : 0.0)
+                                                          : ((hall_on)   ? beta_full : 0.0);
                     double obb = 1.0/(1.0 + beta*beta);
-                    double mxF = sigmaF*(nxF + beta*nyF)*obb;
-                    double myF = sigmaF*(nyF - beta*nxF)*obb;
+                    double beta_rot = (hall_face) ? (hall_scheme_central ? beta : beta_full) : 0.0;
+                    double obb_rot = 1.0/(1.0 + beta_rot*beta_rot);
+                    // FULL tensor rotated normal m = sigma_t^T n. Retained ONLY for the
+                    // u x B source below, which is a flux of a known vector field: both
+                    // cells sharing a face see the same m, so it is single-valued and
+                    // conservative as it stands, and it involves no derivative of phi.
+                    double mxF = sigmaF*(nxF + beta_rot*nyF)*obb_rot;
+                    double myF = sigmaF*(nyF - beta_rot*nxF)*obb_rot;
+                    // PATH 2 SPLIT. The grad-phi flux keeps only the SYMMETRIC (Pedersen)
+                    // part, m_S = sigma_P*n. The skew (Hall) part -- which in the old form
+                    // entered here as sigma_H*(t . grad phi), a tangential gradient
+                    // reconstructed differently by each of the two cells sharing the face,
+                    // and hence the discrete-curl non-conservation -- is moved below to an
+                    // exactly conservative upwinded convection term. See
+                    // computeHallVertexField for the derivation.
+                    // A/B switch for the two Hall discretisations, so both can be run
+                    // from one binary and compared directly:
+                    //   LMR_HALL_SCHEME=central -> the original full-tensor centred flux
+                    //   LMR_HALL_SCHEME=upwind  -> the Path 2 split (default)
+                    double sigmaP = sigmaF*obb;
+                    double mSx, mSy;
+                    if (hall_scheme_central) {
+                        mSx = sigmaF*(nxF + beta*nyF)*obb;   // full tensor, as before
+                        mSy = sigmaF*(nyF - beta*nxF)*obb;
+                    } else {
+                        mSx = sigmaP*nxF;                    // symmetric (Pedersen) part only
+                        mSy = sigmaP*nyF;
+                    }
 
                     // Hybrid method
                     double facx = nxF - ehatx*ehatx*nxF - ehatx*ehaty*nyF;
@@ -368,9 +634,9 @@ class ElectricField {
                     // for beta = 0 they are exactly those products. The un-folded
                     // facx/facy/fac remain for the *_direct_component BC calls, which
                     // fold sigma internally.
-                    double mdote = ehatx*mxF + ehaty*myF;
-                    double sfacx = mxF - ehatx*mdote;
-                    double sfacy = myF - ehaty*mdote;
+                    double mdote = ehatx*mSx + ehaty*mSy;
+                    double sfacx = mSx - ehatx*mdote;
+                    double sfacy = mSy - ehaty*mdote;
                     double sfac  = mdote/emag;
 
                     // Finite difference stencil
@@ -393,8 +659,19 @@ class ElectricField {
                             facx = nxF;
                             facy = nyF;
                             fac = 0.0;
-                            sfacx = sigmaF*nxF;
-                            sfacy = sigmaF*nyF;
+                            // The face conductivity here must match what the interior
+                            // scheme uses, or the insulator boundary conducts at a totally
+                            // different rate from the bulk. Note m.n = sigma_P even for the
+                            // full tensor, so sigma was always the wrong scale here; the
+                            // central scheme merely masks it because its sigma_H tangential
+                            // term partly compensates. Under the Path 2 split there is no
+                            // such compensation and the mismatch is a factor 1+beta^2 (~226
+                            // at beta=15), which drives phi to +-2 kV on a 0-400 V problem.
+                            // Only the upwind branch is changed, so `central` stays
+                            // bit-identical to the established results.
+                            double sig_zng = hall_scheme_central ? sigmaF : sigmaP;
+                            sfacx = sig_zng*nxF;
+                            sfacy = sig_zng*nyF;
                             sfac = 0.0;
                         } else if (auto celec = cast(CircuitElectrode) field_bc){
                             // Electrode wired into the external circuit. Same
@@ -510,6 +787,58 @@ class ElectricField {
                         }
                     }
 
+                    // PATH 2: the Hall term, as an exactly conservative upwinded
+                    // convective flux  -S*(a.n)*phi_face  (see computeHallVertexField).
+                    //
+                    // S*(a.n) is the change in sigma_H between the face's two endpoints,
+                    // taken along t = (n_y, -n_x). Because both cells sharing the face
+                    // read the same two vertex values and have opposite n, their
+                    // contributions cancel exactly; and around a closed cell the sum
+                    // telescopes to exactly zero, so a uniform phi drives no current.
+                    //
+                    // Upwinding: row k accumulates +contour_int (sigma grad phi).n dS, so
+                    // its diffusive diagonal is negative. Taking the DONOR cell keeps that
+                    // sign, which is what makes the operator monotone:
+                    //     a.n > 0 -> phi_face = phi_k      (diagonal gets -S*(a.n) < 0)
+                    //     a.n < 0 -> phi_face = phi_other  (off-diagonal gets -S*(a.n) > 0)
+                    // This is first-order upwind, i.e. terms 1-3 of Parent's Eq. (45). The
+                    // minmod anti-diffusion (term 4) is a nonlinear deferred correction and
+                    // is applied on the RHS; see hall_antidiffusion below.
+                    // Applied on EVERY face -- interior, block-shared and true domain
+                    // boundary alike. That is not optional: the sum of S*(a.n) around a
+                    // closed cell telescopes to exactly zero only if no face is skipped,
+                    // and that identity is what guarantees a uniform phi drives no current.
+                    // An earlier version gated this to interior faces and C6_pow blew up
+                    // one step after the field switched on (0.73 -> 2.8e6 -> negative
+                    // internal energy), which is exactly the spurious-source signature.
+                    if (hall_on && !hall_scheme_central && face.vtx.length == 2) {
+                        double tx =  nyF;
+                        double ty = -nxF;
+                        auto v0 = face.vtx[0];
+                        auto v1 = face.vtx[1];
+                        double ddx = v1.pos[0].x.re - v0.pos[0].x.re;
+                        double ddy = v1.pos[0].y.re - v0.pos[0].y.re;
+                        double along = ddx*tx + ddy*ty;   // >0 if v0->v1 runs along +t
+                        double sH0 = sigmaH_vtx[blkid][v0.id];
+                        double sH1 = sigmaH_vtx[blkid][v1.id];
+                        double S_an = (along >= 0.0) ? (sH1 - sH0) : (sH0 - sH1);
+                        if (S_an != 0.0) {
+                            bool interior = !face.is_on_boundary
+                                || field_bcs[blkid][face.bc_id].isShared;
+                            if (S_an > 0.0 || !interior) {
+                                // Donor is this cell. At a domain boundary we take phi_k
+                                // whatever the sign: the exterior carries no independent
+                                // potential we can upwind from (a sheath electrode's metal
+                                // potential is not the plasma-edge value), and using phi_k
+                                // keeps the telescoping exact, since under a uniform phi
+                                // every face value is the same constant.
+                                A[k*nbands + 2] += -S_an;
+                            } else {
+                                A[k*nbands + iio] += -S_an;   // donor is the neighbour
+                            }
+                        }
+                    }
+
                     // u x B motional-EMF source (low magnetic Reynolds number):
                     // charge continuity div(sigma_t(grad phi - uxB)) = 0 puts the
                     // m.(uxB) flux on the RHS (m = sigma_t^T n; scalar sigma*n when the
@@ -534,6 +863,55 @@ class ElectricField {
                         }
                     }
                 }
+            }
+        }
+
+        // CONSERVATION CHECK (Path 2). For any cell all of whose faces are interior or
+        // block-shared, the assembled row must annihilate a uniform phi: the diffusive
+        // terms are differences, the FD-stencil gradient is exact on constants, and the
+        // Hall convection sums to -phi_k * sum_faces S*(a.n), which telescopes to zero
+        // because each vertex is the "end" of one face and the "start" of the next.
+        //
+        // This is the single most informative check on the Hall discretisation: a row sum
+        // that is not at round-off means a uniform potential is manufacturing current,
+        // which is precisely the defect Path 2 exists to remove. Reported for the first
+        // few solves only.
+        // NB: deliberately NOT gated on `verbose` -- the Newton-Krylov path calls
+        // solve_efield with verbose=false (newtonkrylovsolver.d:2539, :3489), which is
+        // exactly the path this check matters for. The counter advances identically on
+        // every rank, so the reduction below stays collective.
+        if (hall_rowsum_reports < 3) {
+            double worst = 0.0;
+            double scale = 0.0;
+            foreach(blkid, block; localFluidBlocks){
+                foreach(cell; block.cells){
+                    bool all_interior = true;
+                    foreach(face; cell.iface){
+                        if (face.is_on_boundary && !(field_bcs[blkid][face.bc_id].isShared)) {
+                            all_interior = false; break;
+                        }
+                    }
+                    if (!all_interior) continue;
+                    int k = cell.id + block_offsets[blkid];
+                    double rs = 0.0, mag = 0.0;
+                    foreach(band; 0 .. nbands){
+                        if (Ai[k*nbands + band] < 0) continue;
+                        rs  += A[k*nbands + band];
+                        mag += fabs(A[k*nbands + band]);
+                    }
+                    if (fabs(rs) > worst) { worst = fabs(rs); scale = mag; }
+                }
+            }
+            version(mpi_parallel){
+                double[2] loc = [worst, scale]; double[2] glb;
+                MPI_Allreduce(loc.ptr, glb.ptr, 2, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
+                worst = glb[0]; scale = glb[1];
+            }
+            if (GlobalConfig.is_master_task) {
+                writefln("  [efield/hall] interior row-sum |sum A| = %.3e  (row |A| scale %.3e, "
+                         ~ "relative %.3e) -- should be at round-off",
+                         worst, scale, (scale > 0.0) ? worst/scale : 0.0);
+                stdout.flush();
             }
         }
 
@@ -566,6 +944,24 @@ class ElectricField {
             // ---- ordinary path: byte-for-byte what this solver has always done ----
             phi0[] = 0.0;
             gmres.solve(N, nbands, A, Ai, b, phi0, phi, max_iter, verbose);
+            // Report the solved potential range for the first few solves that carry a
+            // varying sigma_H. A field solve that has gone wrong shows up here long
+            // before the flow crashes, and distinguishes "the field is garbage" from
+            // "the field is fine but the J x B source reacts badly to it".
+            if (hall_phi_reports < 3) {
+                double lo = phi[0], hi = phi[0];
+                foreach (v; phi) { if (v < lo) lo = v; if (v > hi) hi = v; }
+                version(mpi_parallel){
+                    double[2] loc = [-lo, hi]; double[2] glb;
+                    MPI_Allreduce(loc.ptr, glb.ptr, 2, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
+                    lo = -glb[0]; hi = glb[1];
+                }
+                if (GlobalConfig.is_master_task) {
+                    writefln("  [efield/hall] solved phi in [%.4g, %.4g] V", lo, hi);
+                    stdout.flush();
+                }
+                hall_phi_reports += 1;
+            }
         } else {
             // ---- augmented (external-circuit) path: Woodbury/Schur ----
             // The border blocks are rank-local: a node's faces may live on cells owned
@@ -940,9 +1336,18 @@ private:
     double[][] Uc, Wt;            // [K][N] border blocks of the augmented system
     double[] Lmat, cvec;          // K*K row-major, and length K
     int circuit_solve_count = 0;
+    int hall_rowsum_reports = 0;
+    int hall_phi_reports = 0;
+    bool hall_scheme_central;
     FieldBC[][] field_bcs;
     int[] block_offsets; // FIXME: Badness with the block id's not matching their order in local fluid blocks
     bool[] zng_layer;    // cells with one-sided (non-interior) ZNG stencil families; Hall is gated off on their faces
+    // Hall convection field (Path 2). sigma_H = sigma*beta/(1+beta^2) at cells, its
+    // halo across block boundaries, and its vertex-averaged values per block. See
+    // computeHallVertexField.
+    double[] sigmaH_cell;      // [N] global-indexed
+    double[] sigmaH_halo;      // [nExtraCells] remote cells, in other_id order
+    double[][] sigmaH_vtx;     // [block][vertex id]
     version(mpi_parallel){
         Exchanger exchanger;
     }

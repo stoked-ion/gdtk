@@ -135,7 +135,7 @@ Implementation: the electrode unknowns border the existing 5-band matrix, and th
 
 #### Hall discretisation and the insulator boundary condition (`LMR_HALL_SCHEME`, `LMR_INSULATOR_BC`)
 
-Two environment switches select how the Hall (skew) part of the conductivity tensor is discretised. Both default to the historical behaviour, and every established result on this branch was produced with the defaults.
+Two environment switches select how the Hall (skew) part of the conductivity tensor is discretised. Both default to the historical behaviour, and every established result on this branch was produced with the defaults — a fresh converged `C6_pow` run under `central` with all of the below in place reproduces the stored golden F_x, F_y, Δu, I and η to 0.000%.
 
 - **`LMR_HALL_SCHEME=central`** (default) — the original centred full-tensor flux, `σ_H (t·∇φ)`. Each of the two cells sharing a face reconstructs that tangential gradient from its own stencil, so it is two-valued: a discrete-curl defect that manufactures current wherever the stencil family changes.
 - **`LMR_HALL_SCHEME=upwind`** — Path 2, the Parent et al. (2011) reformulation. Integration by parts turns the Hall term into an exactly conservative upwinded convective flux, `−S(a·n)φ_face` with `S(a·n) = σ_H(v_end) − σ_H(v_start)` between the face's two *vertices*: single-valued, and it telescopes to exactly zero around a closed cell. The implicit operator stays 5-point, so Path 1's Woodbury path is untouched. Pass it through MPI with `mpirun -x LMR_HALL_SCHEME`.

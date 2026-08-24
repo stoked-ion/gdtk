@@ -69,8 +69,32 @@ class ElectricField {
         // until it is validated on a real case; see the Path 2 notes in
         // tools/hall-stencil/. This keeps the committed default bit-identical.
         hall_scheme_central = (environment.get("LMR_HALL_SCHEME", "central") != "upwind");
+        // How an insulating (ZeroNormalGradient) boundary is treated once a magnetic
+        // field is applied. Only consulted by the upwind (Path 2) scheme; `central`
+        // always behaves as "legacy".
+        //   tensor : the full J.n = 0 condition for the skew conductivity tensor,
+        //            dphi/dn = -beta*dphi/dt + (uxB).n + beta*(uxB).t. Correct for a
+        //            genuinely insulating surface sitting in the field.
+        //   emf    : beta dropped from the wall condition, dphi/dn = (uxB).n. This is
+        //            the condition the module's old TODO named, and it is the right
+        //            model for an OPEN end that merely truncates a longer channel: the
+        //            Hall current is allowed to continue through the boundary instead of
+        //            being turned back into the domain.
+        //   legacy : dphi/dn = 0 and no wall source, exactly as before Path 2.
+        {
+            string m = environment.get("LMR_INSULATOR_BC", "tensor");
+            insulator_tensor = (m == "tensor");
+            insulator_emf    = (m == "tensor") || (m == "emf");
+            if (m != "tensor" && m != "emf" && m != "legacy") {
+                throw new Error("LMR_INSULATOR_BC must be tensor, emf or legacy; got '"~m~"'");
+            }
+        }
         if (GlobalConfig.is_master_task)
             writefln("  [efield/hall] scheme = %s", hall_scheme_central ? "central (original)" : "upwind (Path 2)");
+            if (!hall_scheme_central) {
+                writefln("  [efield/hall] insulator BC = %s",
+                         insulator_tensor ? "tensor" : (insulator_emf ? "emf" : "legacy"));
+            }
 
         // I don't want random bits of the field module hanging off the boundary conditions.
         // Doing it this way is bad encapsulation, but it makes sure that other people only break my code
@@ -405,6 +429,11 @@ class ElectricField {
 
                 double[4] fdx, fdy, fdxx, fdyy;
                 double _Ix, _Iy, _Ixx, _Iyy, D;
+                // Sensitivity of the reconstructed gradient to a prescribed wall slope,
+                // C = (_Cx, _Cy); see the insulator boundary condition below. Zero for an
+                // interior cell, and C.n == 1 exactly for a wall cell.
+                double _Cx = 0.0, _Cy = 0.0;
+                int wall_io = -1;
 
                 // Figure out what kind of cell we are, since ones with ZeroNormalGradient
                 // have different equations for the derivatives...
@@ -420,6 +449,7 @@ class ElectricField {
 						// reconstruction there is harmless.
 						if ((cast(ZeroNormalGradient) field_bc) !is null) {
                             celltype = celltype | ZNG_types[io];
+                            wall_io = to!int(io);
 						}
                     }
 				}
@@ -439,6 +469,9 @@ class ElectricField {
                     fdy[3] = mixin(ZGN_Wy);
                     _Iy    = mixin(ZGN_Iy);
 
+                    _Cx    = mixin(ZGN_Gx)/D;
+                    _Cy    = mixin(ZGN_Gy)/D;
+
                     break;
                 case ZNG_east:
                     D = mixin(ZGE_D);
@@ -453,6 +486,9 @@ class ElectricField {
                     fdy[2] = mixin(ZGE_Sy);
                     fdy[3] = mixin(ZGE_Wy);
                     _Iy    = mixin(ZGE_Iy);
+
+                    _Cx    = mixin(ZGE_Gx)/D;
+                    _Cy    = mixin(ZGE_Gy)/D;
 
                     break;
                 case ZNG_south:
@@ -469,6 +505,9 @@ class ElectricField {
                     fdy[3] = mixin(ZGS_Wy);
                     _Iy    = mixin(ZGS_Iy);
 
+                    _Cx    = mixin(ZGS_Gx)/D;
+                    _Cy    = mixin(ZGS_Gy)/D;
+
                     break;
                 case ZNG_west:
                     D = mixin(ZGW_D);
@@ -483,6 +522,9 @@ class ElectricField {
                     fdy[2] = mixin(ZGW_Sy);
                     fdy[3] = mixin(ZGW_Wy);
                     _Iy    = mixin(ZGW_Iy);
+
+                    _Cx    = mixin(ZGW_Gx)/D;
+                    _Cy    = mixin(ZGW_Gy)/D;
 
                     break;
                 case ZNG_interior:
@@ -507,6 +549,86 @@ class ElectricField {
 
                 double Bz_app = GlobalConfig.applied_Bz;
                 bool hall_on = GlobalConfig.electric_field_hall_effect && (Bz_app != 0.0);
+
+                // ---------------------------------------------------------------------
+                // PATH 2: the insulating-wall boundary condition for the FULL tensor.
+                //
+                // With a skew sigma_t, J.n = 0 at a bare wall is NOT dphi/dn = 0. Using
+                // the identity stated at the face loop below, J.n = m.(-grad phi + uxB)
+                // with m = sigma_P*n + sigma_H*t and t = (n_y, -n_x), dividing through by
+                // sigma_P gives an oblique-derivative (mixed Robin) condition:
+                //
+                //     dphi/dn = -beta*dphi/dt + (uxB).n + beta*(uxB).t  ==  g_n
+                //
+                // beta = 0 recovers dphi/dn = (uxB).n -- the case the module's old TODO
+                // named -- and dropping the uxB part too recovers exactly what the ZG*
+                // families assume. At beta ~ 15 the tangential term IS the condition:
+                // holding dphi/dn = 0 makes the wall a far better insulator than it
+                // physically is and piles potential up at the channel ends, which is the
+                // +-1-2 kV span C6_pow showed one step after switch-on under the split.
+                //
+                // Implementation. The ZG* families solve a 4x4 system in which the wall
+                // neighbour's row is replaced by the constraint row (n_x, n_y, 0, 0) with
+                // a ZERO right-hand side. That system is linear, so a non-zero g_n simply
+                // adds g_n*C to the reconstructed gradient, C = (ZG?_Gx, ZG?_Gy)/D, and
+                // C.n == 1 identically (C == n on a symmetric stencil). g_n itself
+                // depends on dphi/dt, so close the loop once, exactly:
+                //
+                //     t.grad   = t.grad_h + g_n*gamma,   gamma = C.t
+                //     g_n      = (s - beta*t.grad_h)/(1 + beta*gamma)
+                //     s        = (uxB).n + beta*(uxB).t
+                //
+                // and the whole condition collapses into a rescaling of this cell's OWN
+                // stencil weights plus one known constant. No new neighbours, no
+                // bandwidth change, and no lagging: the tangential coupling is fully
+                // implicit. That matters -- at beta = 15 the prescribed derivative
+                // direction n + beta*t is within 4 degrees of tangential, so a Picard-
+                // lagged version would iterate a fixed point with gain ~beta.
+                //
+                // Because the SAME corrected weights then feed every use of the
+                // reconstruction -- the wall face's own flux and the cell's other faces
+                // alike -- there is exactly one place to change and no double counting.
+                //
+                // UPWIND ONLY. `central` keeps the historical dphi/dn = 0 wall so that
+                // every established result stays bit-identical.
+                double robin_gx = 0.0, robin_gy = 0.0;
+                if (!hall_scheme_central && insulator_emf && wall_io >= 0 && Bz_app != 0.0) {
+                    auto wface = cell.iface[wall_io];
+                    double wsign = cell.outsign[wall_io];
+                    double wnx = wsign*wface.n.x.re;
+                    double wny = wsign*wface.n.y.re;
+                    double wtx =  wny;
+                    double wty = -wnx;
+                    double wbeta = (hall_on && insulator_tensor) ?
+                        conductivity.hall_beta(wface.fs.gas, gmodel, Bz_app) : 0.0;
+                    // (u x B) = (uy*Bz, -ux*Bz, 0)
+                    double wux = wface.fs.vel.x.re;
+                    double wuy = wface.fs.vel.y.re;
+                    double exn = Bz_app*(wuy*wnx - wux*wny);
+                    double ext = Bz_app*(wuy*wtx - wux*wty);
+                    double s_bc = exn + wbeta*ext;
+                    double gamma = _Cx*wtx + _Cy*wty;
+                    double den = 1.0 + wbeta*gamma;
+                    // gamma vanishes on a symmetric stencil and is small on any smooth
+                    // grid, so den ~ 1. Guard anyway rather than let one pathological
+                    // cell produce a sign-flipped wall.
+                    if (fabs(den) > 0.1) {
+                        double f = wbeta/den;
+                        double[4] tau;
+                        foreach(j; 0 .. 4) tau[j] = wtx*fdx[j] + wty*fdy[j];
+                        double tauI = wtx*_Ix + wty*_Iy;
+                        foreach(j; 0 .. 4) {
+                            fdx[j] -= f*_Cx*tau[j];
+                            fdy[j] -= f*_Cy*tau[j];
+                        }
+                        _Ix -= f*_Cx*tauI;
+                        _Iy -= f*_Cy*tauI;
+                        // The known part of g_n. fdx/_Ix carry a 1/D that is applied at
+                        // the point of use; these do not.
+                        robin_gx = _Cx*s_bc/den;
+                        robin_gy = _Cy*s_bc/den;
+                    }
+                }
 
                 foreach(io, face; cell.iface){
                     int iio = (io>1) ? to!int(io+1) : to!int(io); // -> [0,1,3,4] since 2 is
@@ -601,8 +723,17 @@ class ElectricField {
                     // u x B source below, which is a flux of a known vector field: both
                     // cells sharing a face see the same m, so it is single-valued and
                     // conservative as it stands, and it involves no derivative of phi.
-                    double mxF = sigmaF*(nxF + beta_rot*nyF)*obb_rot;
-                    double myF = sigmaF*(nyF - beta_rot*nxF)*obb_rot;
+                    // The source tensor is the PHYSICAL one on every face, true domain
+                    // boundaries included: this is the flux of a KNOWN field, it is
+                    // single-valued, and no conservation argument asks for it to be
+                    // gated. The old beta_rot gating silently reverted a boundary face to
+                    // the unmagnetised sigma. `central` keeps beta_rot and so stays
+                    // bit-identical; under the split the wall needs the true m for the
+                    // insulator condition above to balance.
+                    double beta_src = hall_scheme_central ? beta_rot : beta;
+                    double obb_src  = 1.0/(1.0 + beta_src*beta_src);
+                    double mxF = sigmaF*(nxF + beta_src*nyF)*obb_src;
+                    double myF = sigmaF*(nyF - beta_src*nxF)*obb_src;
                     // PATH 2 SPLIT. The grad-phi flux keeps only the SYMMETRIC (Pedersen)
                     // part, m_S = sigma_P*n. The skew (Hall) part -- which in the old form
                     // entered here as sigma_H*(t . grad phi), a tangential gradient
@@ -680,7 +811,37 @@ class ElectricField {
                             // that the electrode potential is an UNKNOWN, so the
                             // linearization contributes to four blocks rather than two.
                             facx = 0.0; facy = 0.0; fac = 0.0;
-                            sfacx = 0.0; sfacy = 0.0; sfac = 0.0;
+                            // PATH 2: zeroing the stencil removes this face's PEDERSEN
+                            // flux and its source, which is what "the gas carries no
+                            // current here" means for the scalar path. It does NOT remove
+                            // the face's HALL flux: under the split that is no longer a
+                            // local term at all, it lives in the contour sum -S_an*phi,
+                            // and gating any face there breaks the telescoping that makes
+                            // a uniform phi drive no current. So subtract the face's own
+                            // sigma_H*(t.grad phi) explicitly instead, by giving it the
+                            // stencil factor -sigma_H*t. What is left is the sum over the
+                            // cell's OTHER faces of the full physical flux, exactly as
+                            // wanted; it vanishes for a uniform phi, so the conservation
+                            // check still holds; and it is one-sided only at a domain
+                            // boundary, where there is no partner cell to be conservative
+                            // with. Without this the electrode wall leaks an O(sigma_H)
+                            // current and the corner cells where it meets an insulating
+                            // end run away -- 4e7 V/m on C6_pow, with the error growing
+                            // under refinement (tools/hall-stencil/channel.py, test E).
+                            // sigma_H here MUST come from the same vertex field the
+                            // convection term uses, not from the face's own gas state.
+                            // At a cold electrode the FACE conductivity has collapsed to
+                            // ~0 while the vertex average (built from the hot near-wall
+                            // CELL values) is the bulk value -- so a face-based sigma_H
+                            // subtracts almost nothing and leaves the leak in place.
+                            double sigH_w = 0.0;
+                            if (!hall_scheme_central && face.vtx.length == 2) {
+                                sigH_w = 0.5*(sigmaH_vtx[blkid][face.vtx[0].id]
+                                            + sigmaH_vtx[blkid][face.vtx[1].id]);
+                            }
+                            sfacx = -sigH_w*nyF;
+                            sfacy =  sigH_w*nxF;
+                            sfac  = 0.0;
                             if (celec.is_electrode(face)) {
                                 double S_f = face.length.re;
                                 double q_star = celec.Velectrode_at(face);
@@ -710,9 +871,37 @@ class ElectricField {
                             facx = 0.0;
                             facy = 0.0;
                             fac = 0.0;
-                            sfacx = 0.0;
-                            sfacy = 0.0;
-                            sfac = 0.0;
+                            // PATH 2: zeroing the stencil removes this face's PEDERSEN
+                            // flux and its source, which is what "the gas carries no
+                            // current here" means for the scalar path. It does NOT remove
+                            // the face's HALL flux: under the split that is no longer a
+                            // local term at all, it lives in the contour sum -S_an*phi,
+                            // and gating any face there breaks the telescoping that makes
+                            // a uniform phi drive no current. So subtract the face's own
+                            // sigma_H*(t.grad phi) explicitly instead, by giving it the
+                            // stencil factor -sigma_H*t. What is left is the sum over the
+                            // cell's OTHER faces of the full physical flux, exactly as
+                            // wanted; it vanishes for a uniform phi, so the conservation
+                            // check still holds; and it is one-sided only at a domain
+                            // boundary, where there is no partner cell to be conservative
+                            // with. Without this the electrode wall leaks an O(sigma_H)
+                            // current and the corner cells where it meets an insulating
+                            // end run away -- 4e7 V/m on C6_pow, with the error growing
+                            // under refinement (tools/hall-stencil/channel.py, test E).
+                            // sigma_H here MUST come from the same vertex field the
+                            // convection term uses, not from the face's own gas state.
+                            // At a cold electrode the FACE conductivity has collapsed to
+                            // ~0 while the vertex average (built from the hot near-wall
+                            // CELL values) is the bulk value -- so a face-based sigma_H
+                            // subtracts almost nothing and leaves the leak in place.
+                            double sigH_w = 0.0;
+                            if (!hall_scheme_central && face.vtx.length == 2) {
+                                sigH_w = 0.5*(sigmaH_vtx[blkid][face.vtx[0].id]
+                                            + sigmaH_vtx[blkid][face.vtx[1].id]);
+                            }
+                            sfacx = -sigH_w*nyF;
+                            sfacy =  sigH_w*nxF;
+                            sfac  = 0.0;
                             if (sheath.is_electrode(face)) {
                                 double a_diag, b_rhs;
                                 sheath.linearized_robin(face, cell.electric_potential.re, gmodel, a_diag, b_rhs);
@@ -738,6 +927,12 @@ class ElectricField {
                     // PART TWO: The other part of the gradient comes from a finite difference stencil,
                     // which has components from all of the nearby cells, and cell k:
                     A[k*nbands + 2] +=  S/D*(sfacx*(_Ix) + sfacy*(_Iy));
+
+                    // Constant (uxB) part of the insulator Robin slope. Identically zero
+                    // unless this cell has a ZNG wall face and the upwind scheme is on.
+                    if (robin_gx != 0.0 || robin_gy != 0.0) {
+                        b[k] -= S*(sfacx*robin_gx + sfacy*robin_gy);
+                    }
 
                     // Each jface makes a contribution to the flux through "face"
                     foreach(jo, jface; cell.iface){
@@ -849,17 +1044,41 @@ class ElectricField {
                     // inflow/outflow boundaries of an axial-flow channel.]
                     if (Bz_app != 0.0) {
                         bool insulator = false;
+                        bool zng_face = false;
                         if (face.is_on_boundary) {
                             auto fbc = field_bcs[blkid][face.bc_id];
-                            if (((cast(ZeroNormalGradient) fbc) !is null) ||
-                                ((cast(SheathField) fbc) !is null) ||
+                            if ((cast(ZeroNormalGradient) fbc) !is null) {
+                                insulator = true;
+                                zng_face = true;
+                            }
+                            if (((cast(SheathField) fbc) !is null) ||
                                 ((cast(CircuitElectrode) fbc) !is null)) insulator = true;
                         }
-                        if (!insulator) {
+                        // Under the split a ZNG wall DOES carry this source. Its J.n = 0
+                        // is imposed through the reconstruction (the Robin slope above),
+                        // and for the cell's assembled flux sum to equal the physical one
+                        // every face must contribute its m.(uxB) term. Dropping it is what
+                        // made the old wall condition inconsistent: it does not converge
+                        // under grid refinement at all, see tools/hall-stencil/channel.py.
+                        // Sheath and circuit-electrode faces still get no source -- their
+                        // gas-conduction stencil is suppressed and their current comes
+                        // from the sheath law instead.
+                        if (!insulator || (zng_face && !hall_scheme_central && insulator_emf)) {
                             double uxf = face.fs.vel.x.re;
                             double uyf = face.fs.vel.y.re;
+                            double mx = mxF, my = myF;
+                            if (zng_face) {
+                                // Must match the Robin slope imposed above, or the wall's
+                                // net flux does not vanish: m_wall = sigma_P*(n + beta*t)
+                                // with the SAME beta the condition was written with (zero
+                                // in "emf" mode). sigma_P itself always uses the physical
+                                // beta -- it is a property of the magnetised gas.
+                                double bi = insulator_tensor ? beta : 0.0;
+                                mx = sigmaP*(nxF + bi*nyF);
+                                my = sigmaP*(nyF - bi*nxF);
+                            }
                             // (u x B) = (uy*Bz, -ux*Bz, 0); source = m.(uxB) S
-                            b[k] += S * Bz_app * (mxF*uyf - myF*uxf);
+                            b[k] += S * Bz_app * (mx*uyf - my*uxf);
                         }
                     }
                 }
@@ -1116,6 +1335,11 @@ class ElectricField {
 
                 double[4] fdx, fdy;
                 double _Ix, _Iy, D;
+                // Sensitivity of the reconstructed gradient to a prescribed wall slope,
+                // C = (_Cx, _Cy); see the insulator boundary condition below. Zero for an
+                // interior cell, and C.n == 1 exactly for a wall cell.
+                double _Cx = 0.0, _Cy = 0.0;
+                int wall_io = -1;
 
                 // Figure out what kind of cell we are, since ones with ZeroNormalGradient
                 // have different equations for the derivatives...
@@ -1131,6 +1355,7 @@ class ElectricField {
 						// reconstruction there is harmless.
 						if ((cast(ZeroNormalGradient) field_bc) !is null) {
                             celltype = celltype | ZNG_types[io];
+                            wall_io = to!int(io);
 						}
                     }
 				}
@@ -1150,6 +1375,9 @@ class ElectricField {
                     fdy[3] = mixin(ZGN_Wy);
                     _Iy    = mixin(ZGN_Iy);
 
+                    _Cx    = mixin(ZGN_Gx)/D;
+                    _Cy    = mixin(ZGN_Gy)/D;
+
                     break;
                 case ZNG_east:
                     D = mixin(ZGE_D);
@@ -1164,6 +1392,9 @@ class ElectricField {
                     fdy[2] = mixin(ZGE_Sy);
                     fdy[3] = mixin(ZGE_Wy);
                     _Iy    = mixin(ZGE_Iy);
+
+                    _Cx    = mixin(ZGE_Gx)/D;
+                    _Cy    = mixin(ZGE_Gy)/D;
 
                     break;
                 case ZNG_south:
@@ -1180,6 +1411,9 @@ class ElectricField {
                     fdy[3] = mixin(ZGS_Wy);
                     _Iy    = mixin(ZGS_Iy);
 
+                    _Cx    = mixin(ZGS_Gx)/D;
+                    _Cy    = mixin(ZGS_Gy)/D;
+
                     break;
                 case ZNG_west:
                     D = mixin(ZGW_D);
@@ -1194,6 +1428,9 @@ class ElectricField {
                     fdy[2] = mixin(ZGW_Sy);
                     fdy[3] = mixin(ZGW_Wy);
                     _Iy    = mixin(ZGW_Iy);
+
+                    _Cx    = mixin(ZGW_Gx)/D;
+                    _Cy    = mixin(ZGW_Gy)/D;
 
                     break;
                 case ZNG_interior:
@@ -1218,8 +1455,74 @@ class ElectricField {
 
                 double Ex = (_Ix*cell.electric_potential + fdx[0]*phis[0] + fdx[1]*phis[1] + fdx[2]*phis[2] + fdx[3]*phis[3])/D;
                 double Ey = (_Iy*cell.electric_potential + fdy[0]*phis[0] + fdy[1]*phis[1] + fdy[2]*phis[2] + fdy[3]*phis[3])/D;
+
+                // The ZG* families reconstruct the gradient that satisfies grad(phi).n = 0
+                // at the wall. Under the Path 2 split the wall actually satisfies the
+                // Robin condition derived in the matrix assembly above, so add the same
+                // g_n*C correction here; otherwise the reported field (and the boundary
+                // current computed from it) would disagree with the operator that
+                // produced phi. `central` is left exactly as it was.
+                double Bz_e = GlobalConfig.applied_Bz;
+                if (!hall_scheme_central && insulator_emf && wall_io >= 0 && Bz_e != 0.0) {
+                    auto wface = cell.iface[wall_io];
+                    double wsign = cell.outsign[wall_io];
+                    double wnx = wsign*wface.n.x.re;
+                    double wny = wsign*wface.n.y.re;
+                    double wtx =  wny;
+                    double wty = -wnx;
+                    double wbeta = (GlobalConfig.electric_field_hall_effect && insulator_tensor) ?
+                        conductivity.hall_beta(wface.fs.gas, GlobalConfig.gmodel_master, Bz_e) : 0.0;
+                    double wux = wface.fs.vel.x.re;
+                    double wuy = wface.fs.vel.y.re;
+                    double s_bc = Bz_e*(wuy*wnx - wux*wny) + wbeta*Bz_e*(wuy*wtx - wux*wty);
+                    double den = 1.0 + wbeta*(_Cx*wtx + _Cy*wty);
+                    if (fabs(den) > 0.1) {
+                        double gn = (s_bc - wbeta*(wtx*Ex + wty*Ey))/den;
+                        Ex += _Cx*gn;
+                        Ey += _Cy*gn;
+                    }
+                }
+
                 cell.electric_field[0] = Ex;
                 cell.electric_field[1] = Ey;
+            }
+        }
+
+        // Diagnostic: the largest reconstructed |grad phi| and where it is. A field with
+        // an unresolved boundary layer -- the classic magnetised-end-region layer of a
+        // Hall device, whose thickness scales like the channel height over beta -- shows
+        // up here as a max hugely larger than the bulk V/H scale, long before it shows up
+        // as a crash in the flow solver downstream. Reported for the first few solves.
+        if (hall_phi_reports <= 4 && GlobalConfig.applied_Bz != 0.0) {
+            double emax = 0.0, ex_at = 0.0, ey_at = 0.0, exv = 0.0, eyv = 0.0;
+            foreach(blkid, block; localFluidBlocks){
+                foreach(cell; block.cells){
+                    double e = sqrt(cell.electric_field[0]^^2 + cell.electric_field[1]^^2);
+                    if (e > emax) {
+                        emax = e;
+                        ex_at = cell.pos[0].x.re; ey_at = cell.pos[0].y.re;
+                        exv = cell.electric_field[0]; eyv = cell.electric_field[1];
+                    }
+                }
+            }
+            version(mpi_parallel){
+                double[5] loc = [emax, ex_at, ey_at, exv, eyv];
+                double[5*128] all;
+                int nranks; MPI_Comm_size(MPI_COMM_WORLD, &nranks);
+                if (nranks <= 128) {
+                    MPI_Allgather(loc.ptr, 5, MPI_DOUBLE, all.ptr, 5, MPI_DOUBLE, MPI_COMM_WORLD);
+                    foreach(r; 0 .. nranks) {
+                        if (all[r*5] > emax) {
+                            emax = all[r*5]; ex_at = all[r*5+1]; ey_at = all[r*5+2];
+                            exv = all[r*5+3]; eyv = all[r*5+4];
+                        }
+                    }
+                }
+            }
+            if (GlobalConfig.is_master_task) {
+                writefln("  [efield/hall] max |grad phi| = %.4g V/m (%.4g, %.4g) at x=%.5g y=%.5g",
+                         emax, exv, eyv, ex_at, ey_at);
+                stdout.flush();
             }
         }
     }
@@ -1338,6 +1641,8 @@ private:
     int circuit_solve_count = 0;
     int hall_rowsum_reports = 0;
     int hall_phi_reports = 0;
+    bool insulator_tensor = true;   // LMR_INSULATOR_BC, see the constructor
+    bool insulator_emf    = true;
     bool hall_scheme_central;
     FieldBC[][] field_bcs;
     int[] block_offsets; // FIXME: Badness with the block id's not matching their order in local fluid blocks

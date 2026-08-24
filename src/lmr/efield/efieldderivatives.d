@@ -610,3 +610,38 @@ int main() {
     return 0;
 }
 */
+
+/*
+    Sensitivity of the reconstructed gradient to a NON-ZERO prescribed normal slope at
+    the wall, grad(phi).n = g_n, for the three-point + gradient-restriction families
+    above.  Those families are derived for g_n = 0; because the underlying 4x4 system is
+    linear, a non-zero g_n simply adds  g_n * C  to the reconstructed gradient, with
+
+        Cx = <fam>_Gx / <fam>_D,     Cy = <fam>_Gy / <fam>_D
+
+    C satisfies the identity C.n == 1 exactly (imposing the slope changes the normal
+    component of the gradient by exactly g_n and nothing else on a symmetric stencil,
+    where C == n; on a skewed stencil C also has a tangential part).
+
+    Needed by the Hall (tensor-conductivity) insulator boundary condition, where J.n = 0
+    is NOT grad(phi).n = 0 but the oblique-derivative condition
+
+        dphi/dn = -beta*dphi/dt + (uxB).n + beta*(uxB).t.
+
+    Derived and verified against a brute-force inverse of the same 4x4 system in
+    tools/hall-stencil/zngbc.py, which also recovers (and checks) the Maxima
+    conventions the families above were generated with.
+*/
+
+const string ZGN_Gx = "-dxE^^2*dyS^^2*dyW + dxE^^2*dyS*dyW^^2 + dxS^^2*dyE^^2*dyW - dxS^^2*dyE*dyW^^2 - dxW^^2*dyE^^2*dyS + dxW^^2*dyE*dyS^^2";
+const string ZGN_Gy = "-dxE^^2*dxS*dyW^^2 + dxE^^2*dxW*dyS^^2 + dxE*dxS^^2*dyW^^2 - dxE*dxW^^2*dyS^^2 - dxS^^2*dxW*dyE^^2 + dxS*dxW^^2*dyE^^2";
+
+const string ZGE_Gx = "dxN^^2*dyS^^2*dyW - dxN^^2*dyS*dyW^^2 - dxS^^2*dyN^^2*dyW + dxS^^2*dyN*dyW^^2 + dxW^^2*dyN^^2*dyS - dxW^^2*dyN*dyS^^2";
+const string ZGE_Gy = "dxN^^2*dxS*dyW^^2 - dxN^^2*dxW*dyS^^2 - dxN*dxS^^2*dyW^^2 + dxN*dxW^^2*dyS^^2 + dxS^^2*dxW*dyN^^2 - dxS*dxW^^2*dyN^^2";
+
+const string ZGS_Gx = "-dxE^^2*dyN^^2*dyW + dxE^^2*dyN*dyW^^2 + dxN^^2*dyE^^2*dyW - dxN^^2*dyE*dyW^^2 - dxW^^2*dyE^^2*dyN + dxW^^2*dyE*dyN^^2";
+const string ZGS_Gy = "-dxE^^2*dxN*dyW^^2 + dxE^^2*dxW*dyN^^2 + dxE*dxN^^2*dyW^^2 - dxE*dxW^^2*dyN^^2 - dxN^^2*dxW*dyE^^2 + dxN*dxW^^2*dyE^^2";
+
+const string ZGW_Gx = "dxE^^2*dyN^^2*dyS - dxE^^2*dyN*dyS^^2 - dxN^^2*dyE^^2*dyS + dxN^^2*dyE*dyS^^2 + dxS^^2*dyE^^2*dyN - dxS^^2*dyE*dyN^^2";
+const string ZGW_Gy = "dxE^^2*dxN*dyS^^2 - dxE^^2*dxS*dyN^^2 - dxE*dxN^^2*dyS^^2 + dxE*dxS^^2*dyN^^2 + dxN^^2*dxS*dyE^^2 - dxN*dxS^^2*dyE^^2";
+

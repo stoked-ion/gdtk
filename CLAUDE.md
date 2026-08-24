@@ -133,6 +133,29 @@ The field solve needs a boundary condition at each electrode. Three exist, in in
 
 Implementation: the electrode unknowns border the existing 5-band matrix, and the augmented system is solved by a Woodbury/Schur complement (`schurSolve`) — `K+1` solves of the *unmodified* banded operator, so the existing GMRES/ILU path is untouched. Measured cost ≈1.23×/step for `K=2`. With no circuit declared, the code takes exactly the pre-existing path. Correctness anchor: a Faraday case re-expressed as `CircuitElectrode` with `R → 0` reproduces the `SheathField` result to 0.05% in F_x and total current — kept as Tier 0 of the project regression suite.
 
+#### Hall discretisation and the insulator boundary condition (`LMR_HALL_SCHEME`, `LMR_INSULATOR_BC`)
+
+Two environment switches select how the Hall (skew) part of the conductivity tensor is discretised. Both default to the historical behaviour, and every established result on this branch was produced with the defaults.
+
+- **`LMR_HALL_SCHEME=central`** (default) — the original centred full-tensor flux, `σ_H (t·∇φ)`. Each of the two cells sharing a face reconstructs that tangential gradient from its own stencil, so it is two-valued: a discrete-curl defect that manufactures current wherever the stencil family changes.
+- **`LMR_HALL_SCHEME=upwind`** — Path 2, the Parent et al. (2011) reformulation. Integration by parts turns the Hall term into an exactly conservative upwinded convective flux, `−S(a·n)φ_face` with `S(a·n) = σ_H(v_end) − σ_H(v_start)` between the face's two *vertices*: single-valued, and it telescopes to exactly zero around a closed cell. The implicit operator stays 5-point, so Path 1's Woodbury path is untouched. Pass it through MPI with `mpirun -x LMR_HALL_SCHEME`.
+
+Under the split, two boundary treatments that were adequate for the scalar path stop being correct, because a face's Hall flux is no longer a local quantity:
+
+1. **Insulating (`ZeroNormalGradient`) faces.** `J·n = 0` with a skew tensor is *not* `∂φ/∂n = 0`. Writing `J·n = m·(−∇φ + u×B)` with `m = σ_P n + σ_H t`, `t = (n_y, −n_x)`, and dividing by σ_P gives an oblique-derivative (mixed Robin) condition:
+
+   ```
+   ∂φ/∂n = −β·∂φ/∂t + (u×B)·n + β·(u×B)·t
+   ```
+
+   Transcribe the signs from the code's own `m`, not from a textbook frame — `(n, t, ẑ)` as defined here is left-handed. The `ZG*` one-sided families are derived for a *zero* wall slope, but their 4×4 system is linear, so a non-zero slope `g_n` simply adds `g_n·C` to the reconstructed gradient, `C = (ZG?_Gx, ZG?_Gy)/D` (`efieldderivatives.d`), with `C·n ≡ 1` exactly. Since `g_n` itself depends on `∂φ/∂t`, the loop closes in one substitution — `g_n = (s − β t·∇φ_h)/(1 + βγ)`, `γ = C·t` — so the whole condition becomes a rescaling of the cell's own stencil weights: fully implicit, in-band, no lagging, no bandwidth change. The old condition is not merely inaccurate, it is **inconsistent**: it does not converge under grid refinement (129% error at β = 15 on an insulating wall, and *growing* with refinement at an insulating end).
+
+   **`LMR_INSULATOR_BC`** selects the model: `tensor` (default under upwind) is the full condition, right for a genuinely insulating surface sitting in the field; `emf` drops β, `∂φ/∂n = (u×B)·n`, which is the right model for an **open end** truncating a longer channel, since it lets the Hall current continue through the boundary rather than turning it back into the domain; `legacy` restores `∂φ/∂n = 0` with no wall source. This is a *modelling* choice, not a discretisation detail — it changes the end-effect current loops.
+
+2. **Electrode (`SheathField`/`CircuitElectrode`) faces.** Zeroing a face's stencil removes its Pedersen flux and its source, which under `central` removed the whole tensor flux and so did impose `J·n = 0`. Under the split it does not: the face's Hall flux is in the contour sum, which cannot be gated without breaking the telescoping. The face must instead subtract its own `σ_H (t·∇φ)`, i.e. take the stencil factor `−σ_H t`. Use the **vertex-averaged** σ_H that the convection term uses — a cold electrode's *face* conductivity has collapsed to ~0 while its vertices carry the hot near-wall cell value.
+
+**Status.** With both corrections the scheme is exact to round-off on a `J = 0` exact solution at β = 15, for all four `ZG*` families and both wall orientations, and low-β cases (β ≈ 1.5) agree with `central` to ~1.4%. It still fails at β ≈ 15 on a **cold, σ-collapsing electrode wall**; that residual error is the first-order donor-cell upwinding — Parent's minmod anti-diffusion (his term 4) is not implemented anywhere in the tree, and is the next piece of work. Standalone verification harnesses: `tools/hall-stencil/zngbc.py` (recovers and checks the `ZG*` Maxima conventions, derives the `_Gx/_Gy` coefficients) and `tools/hall-stencil/channel.py` (assembles the whole scheme against an exact solution; this is where to reproduce a suspected boundary defect cheaply, rather than in a 10-minute solver run).
+
 ### 3. Built-in single-fluid MHD (`version(MHD)`, default on via `MHD ?= 1`) — present but rough in lmr
 
 The Bond/Wheatley single-fluid model, ported from Eilmer 4 (README: "a work in progress"). It is wired through conserved quantities (adds `xB, yB, zB, psi, divB`, and forces z-momentum on in 2D — `conservedquantities.d:133-184`), config keys (`config.MHD`, `MHD_static_field`, `MHD_resistive`, `divergence_cleaning`, `c_h`, `divB_damping_length` — `lua-modules/globalconfig.lua:30`), HLLE flux + Dedner divergence cleaning (`fluxcalc.d:142`), and explicit-update divergence damping (`simcore_gasdynamic_step.d:1122`). **Caveats:**

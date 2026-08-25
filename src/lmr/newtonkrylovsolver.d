@@ -1180,6 +1180,14 @@ void performNewtonKrylovUpdates(int snapshotStart, double startCFL, int maxCPUs,
          */
         residualsUpToDate = false;
         nkStep = step; // mirror for the field-solve deferral gate (electric_field_start_step)
+        // Publish the step globally as well. SimState.step was only ever maintained by the
+        // transient loop, so in a steady run it stayed at 0 -- which matters because a UDF
+        // has no other way to tell how far along it is: the steady solver passes
+        // SimState.time = -1, so any source ramped on physical time silently evaluates to
+        // zero. A step-based ramp is the only continuation a steady UDF can express, and
+        // it needs this. Nothing in the steady path reads SimState.step, so publishing it
+        // cannot change existing behaviour.
+        SimState.step = step;
         // 0a. change of phase
         stepsIntoCurrentPhase++;
         startOfNewPhase = false;

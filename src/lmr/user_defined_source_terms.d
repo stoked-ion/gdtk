@@ -20,6 +20,7 @@ import util.lua_service;
 
 import lmr.fluidfvcell;
 import lmr.globalconfig;
+import lmr.globaldata;
 import lmr.lua_helper;
 
 void getUDFSourceTermsForCell(lua_State* L, FluidFVCell cell, size_t gtl,
@@ -39,6 +40,12 @@ void getUDFSourceTermsForCell(lua_State* L, FluidFVCell cell, size_t gtl,
     lua_newtable(L);
     int tblIdx = lua_gettop(L);
     pushFluidCellToTable(L, tblIdx, cell, gtl, myConfig);
+    // The current step, so a UDF can ramp a source on it. This is the only continuation
+    // available to a STEADY run: the Newton-Krylov solver passes t = -1, so a source
+    // ramped on `t` evaluates to zero for the whole simulation -- a trap that has bitten
+    // this code base before. Switching a strong source on at full strength in one step is
+    // what makes the solver take a step it cannot recover from.
+    lua_pushinteger(L, SimState.step); lua_setfield(L, tblIdx, "step");
     lua_pushinteger(L, blkId); lua_setfield(L, tblIdx, "blkId");
     lua_pushinteger(L, i); lua_setfield(L, tblIdx, "i");
     lua_pushinteger(L, j); lua_setfield(L, tblIdx, "j");

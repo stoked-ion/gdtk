@@ -313,6 +313,23 @@ struct NKPhaseConfig {
     bool frozenLimiterForJacobian = false;
     double linearSolveTolerance = 0.01;
     double fgmresPreconditionSolveTolerance = 1e-2;
+    // Re-set the reference residuals at the start of this phase.
+    //
+    // The reference residuals are accumulated over the first few steps and then frozen for
+    // the whole run, and everything that reasons about progress -- the auto-CFL growth
+    // gate, the phase-change trigger, the stopping criterion -- works with
+    // globalResidual/referenceGlobalResidual. That is fine when the problem being solved
+    // at step 10 is the problem being solved at step 10000. It is not fine when a source
+    // is switched on part-way through: a deferred field solve or an MHD source raises the
+    // residual by four to six orders of magnitude, the relative residual never comes back
+    // under any sensible growth threshold again, and the auto-CFL is silently pinned at
+    // startCFL for the remainder of the run.
+    //
+    // Setting this on the phase that begins after such a switch-on re-references the
+    // residuals against the NEW problem, which restores all three mechanisms. Default
+    // false, in which case nothing changes.
+    bool resetReferenceResiduals = false;
+
     // Auto CFL control
     bool useAutoCFL = false;
     double thresholdRelativeResidualForCFLGrowth = 0.99;
@@ -347,6 +364,7 @@ struct NKPhaseConfig {
         fgmresPreconditionSolveTolerance = getJSONdouble(jsonData,
                                                         "fgmres_preconditioning_solve_tolerance",
                                                         fgmresPreconditionSolveTolerance);
+        resetReferenceResiduals = getJSONbool(jsonData, "reset_reference_residuals", resetReferenceResiduals);
         useAutoCFL = getJSONbool(jsonData, "use_auto_cfl", useAutoCFL);
         thresholdRelativeResidualForCFLGrowth = getJSONdouble(jsonData, "threshold_relative_residual_for_cfl_growth", thresholdRelativeResidualForCFLGrowth);
         startCFL = getJSONdouble(jsonData, "start_cfl", startCFL);
@@ -491,6 +509,10 @@ ScaleFactors rowScale, invColScale;
 double referenceGlobalResidual, globalResidual, prevGlobalResidual;
 bool residualsUpToDate = false;
 bool referenceResidualsAreSet = false;
+// Step from which the reference-residual accumulation window is measured. Zero for the
+// usual case (accumulate over the first numberOfStepsForSettingReferenceResiduals steps),
+// non-zero after a phase has asked for a re-reference.
+int referenceResidualBaseStep = 0;
 
 
 // Module-local, global memory arrays and matrices
@@ -1215,8 +1237,29 @@ void performNewtonKrylovUpdates(int snapshotStart, double startCFL, int maxCPUs,
                 else {
                     writefln("+   ---> CFL continues from previous phase end: cfl=%10.3e                              +", cfl);
                 }
+                if (activePhase.resetReferenceResiduals) {
+                    writefln("+   ---> reference residuals re-set over the next %d steps                                +",
+                             nkCfg.numberOfStepsForSettingReferenceResiduals);
+                }
                 writefln("+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++");
                 writeln();
+            }
+            if (activePhase.resetReferenceResiduals) {
+                // Re-reference against the problem as it now stands. Everything that divides
+                // by referenceGlobalResidual -- the auto-CFL growth gate, the phase-change
+                // trigger, the stopping criterion -- is otherwise measuring against a problem
+                // that no longer exists once a large source has been switched on. Done after
+                // the banner, so that still reports the OLD relative residual rather than
+                // dividing by a reference just cleared.
+                //
+                // Put this on the phase that begins AFTER a source has finished ramping, not
+                // the one where the ramp starts: references taken ten steps into a
+                // six-hundred-step ramp describe almost none of the source, and the relative
+                // residual then climbs to several hundred and plateaus there.
+                referenceResidualsAreSet = false;
+                referenceResidualBaseStep = step;
+                referenceGlobalResidual = 0.0;
+                foreach (ivar; 0 .. nConserved) referenceResiduals[ivar] = 0.0;
             }
         }
 
@@ -1358,12 +1401,19 @@ void performNewtonKrylovUpdates(int snapshotStart, double startCFL, int maxCPUs,
             foreach (ivar; 0 .. nConserved) {
                 referenceResiduals[ivar] = fmax(referenceResiduals[ivar], currentResiduals[ivar]);
             }
-            if (step == nkCfg.numberOfStepsForSettingReferenceResiduals) {
+            if (step - referenceResidualBaseStep == nkCfg.numberOfStepsForSettingReferenceResiduals) {
                 referenceResidualsAreSet = true;
                 if (GlobalConfig.is_master_task) {
                     writeln("*************************************************************************");
                     writeln("*");
-                    writefln("*  After first %d steps, reference residuals have been set.", nkCfg.numberOfStepsForSettingReferenceResiduals);
+                    if (referenceResidualBaseStep == 0) {
+                        writefln("*  After first %d steps, reference residuals have been set.",
+                                 nkCfg.numberOfStepsForSettingReferenceResiduals);
+                    } else {
+                        writefln("*  Reference residuals RE-SET over steps %d-%d, against the problem as it",
+                                 referenceResidualBaseStep+1, step);
+                        writeln("*  now stands (a source switched on since they were first taken).");
+                    }
                     writefln("*  Reference global residual: %.12e", referenceGlobalResidual);
                     writeln("*");
                     writeln("*  Reference residuals for each conservation equation:");

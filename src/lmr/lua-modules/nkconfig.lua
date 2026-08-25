@@ -209,6 +209,13 @@ NewtonKrylovPhaseDefaults = {
    linear_solve_tolerance = 0.01,
    fgmres_preconditioning_solve_tolerance = 0.01,
 
+   -- Re-set the reference residuals at the start of this phase. Needed when a source is
+   -- switched on part-way through a run (a deferred field solve, an MHD source): the
+   -- references are otherwise taken against a problem that no longer exists, the relative
+   -- residual never returns under the auto-CFL growth threshold, and the CFL stays pinned
+   -- at start_cfl for the rest of the simulation.
+   reset_reference_residuals = false,
+
    -- Auto CFL control
    use_auto_cfl = false,
    threshold_relative_residual_for_cfl_growth = 0.99,
@@ -286,6 +293,7 @@ function NewtonKrylovPhase:tojson()
    str = str .. string.format('    "fgmres_preconditioning_solve_tolerance": %.18e,\n', self.fgmres_preconditioning_solve_tolerance)
    str = str .. string.format('    "use_auto_cfl": %s,\n', tostring(self.use_auto_cfl))
    if self.use_auto_cfl then
+      str = str .. string.format('    "reset_reference_residuals": %s,\n', tostring(self.reset_reference_residuals))
       str = str .. string.format('    "threshold_relative_residual_for_cfl_growth": %.18e,\n', self.threshold_relative_residual_for_cfl_growth)
       str = str .. string.format('    "start_cfl": %.18e,\n', self.start_cfl)
       str = str .. string.format('    "max_cfl": %.18e,\n', self.max_cfl)

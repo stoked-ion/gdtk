@@ -51,6 +51,7 @@ GY = {
  "ZGW": "dxE**2*dxN*dyS**2 - dxE**2*dxS*dyN**2 - dxE*dxN**2*dyS**2 + dxE*dxS**2*dyN**2 + dxN**2*dxS*dyE**2 - dxN*dxS**2*dyE**2",
 }
 
+ITERS = 40          # deferred-correction sweeps for conv='antidiff'
 DIRS = ["N", "E", "S", "W"]          # efield.d's cell.iface order
 FAM = {"N": "ZGN", "E": "ZGE", "S": "ZGS", "W": "ZGW"}
 
@@ -106,7 +107,7 @@ class Grid:
 
 
 def solve(g, sigma_fn, beta, ux, Bz, robin_bc, uxb_at_wall, walls="NS", tang="central",
-          drop=False, drop_fix="vertex", conv="upwind"):
+          drop=False, drop_fix="vertex", conv="upwind", phi_lag=None):
     """Assemble and solve exactly as efield.d's upwind branch does.
 
     robin_bc     : apply the derived Robin slope g_n at ZNG walls (False = shipped grad.n=0)
@@ -130,6 +131,7 @@ def solve(g, sigma_fn, beta, ux, Bz, robin_bc, uxb_at_wall, walls="NS", tang="ce
     sH_v /= cnt
 
     A = np.zeros((N, N)); rhs = np.zeros(N)
+    CELL = {}
 
     def ghost_phi(i, j, d):
         """Known-phi ghost beyond an east/west face (assembled as a shared face)."""
@@ -230,6 +232,51 @@ def solve(g, sigma_fn, beta, ux, Bz, robin_bc, uxb_at_wall, walls="NS", tang="ce
                         Fy[m] += Cy * (-beta / den); Fy[4] += Cy * (beta / den)
                         gx_const, gy_const = Cx * pp * s_bc / den, Cy * pp * s_bc / den
 
+            CELL[k] = dict(Fx=Fx, Fy=Fy, gxc=gx_const, gyc=gy_const, info=info, c=c)
+
+    # ---- lagged cell gradients, for the anti-diffusion deferred correction -----------
+    # Evaluated with exactly the weights the assembly uses, including the ghost values and
+    # the dropped face's extrapolated data point, so the correction is consistent with the
+    # operator it corrects.
+    GRAD = {}
+    if phi_lag is not None:
+        for k, C_ in CELL.items():
+            info = C_["info"]
+            cols = [info[dd] for dd in DIRS] + [k]
+            kinds = [info[dd + "_kind"] for dd in DIRS] + ["self"]
+            phis = [info[dd + "_phin"] for dd in DIRS] + [None]
+            gx, gy = C_["gxc"], C_["gyc"]
+            for m, col in enumerate(cols):
+                if C_["Fx"][m] == 0.0 and C_["Fy"][m] == 0.0:
+                    continue
+                if kinds[m] == "zng":
+                    continue
+                if kinds[m] == "ghost":
+                    v = phis[m]
+                elif kinds[m] == "drop":
+                    dm = info[DIRS[m] + "_o"] - C_["c"]
+                    dopp = info[DIRS[(m + 2) % 4] + "_o"] - C_["c"]
+                    tt = (dm @ dopp) / (dopp @ dopp)
+                    oc = info[DIRS[(m + 2) % 4]]
+                    v = (1.0 - tt) * phi_lag[k] + (tt * phi_lag[oc] if oc is not None else 0.0)
+                else:
+                    v = phi_lag[col if kinds[m] != "self" else k]
+                gx += C_["Fx"][m] * v
+                gy += C_["Fy"][m] * v
+            GRAD[k] = np.array([gx, gy])
+
+    def minmod(a, b):
+        if a * b <= 0.0:
+            return 0.0
+        return a if abs(a) < abs(b) else b
+
+    for i in range(nx):
+        for j in range(ny):
+            k = kid(i, j)
+            C_ = CELL[k]
+            Fx, Fy = C_["Fx"], C_["Fy"]
+            gx_const, gy_const = C_["gxc"], C_["gyc"]
+            info, c = C_["info"], C_["c"]
             # ---- face loop -----------------------------------------------------------
             for d in DIRS:
                 kind = info[d + "_kind"]
@@ -311,6 +358,33 @@ def solve(g, sigma_fn, beta, ux, Bz, robin_bc, uxb_at_wall, walls="NS", tang="ce
                 S_an = (s1 - s0) if along >= 0 else (s0 - s1)
                 if S_an != 0.0:
                     interior = kind in ("int", "ghost")
+                    # PARENT'S TERM 4 -- minmod anti-diffusion, as a deferred correction.
+                    # First-order donor-cell upwinding is what still limits this scheme
+                    # wherever sigma varies sharply (a cold electrode wall). The correction
+                    # reconstructs the face value from the DONOR cell's gradient, limited
+                    # against the donor-to-acceptor difference so the face value stays
+                    # bounded by the two cell values. It is single-valued -- both cells
+                    # sharing a face agree on which one is the donor, because S_an flips
+                    # sign with n -- so it stays conservative, and being on the RHS it
+                    # leaves the matrix (and the telescoping identity) untouched.
+                    if (conv == "antidiff" and phi_lag is not None
+                            and kind in ("int", "ghost")):
+                        if S_an > 0.0:
+                            kd, xd = k, c
+                            phiD = phi_lag[k]
+                            phiA = phi_lag[info[d]] if kind == "int" else info[d + "_phin"]
+                        else:
+                            if kind != "int":
+                                kd = None
+                            else:
+                                kd = info[d]
+                                xd = info[d + "_o"]
+                                phiD = phi_lag[kd]
+                                phiA = phi_lag[k]
+                        if kd is not None and kd in GRAD:
+                            unlim = GRAD[kd] @ (p - xd)
+                            delta = minmod(unlim, phiA - phiD)
+                            rhs[k] += S_an * delta
                     if conv == "central" and kind == "int":
                         A[k, k] += -0.5 * S_an
                         A[k, info[d]] += -0.5 * S_an
@@ -350,14 +424,32 @@ def run(label, sigma_fn, betas, ns=(12, 24, 48), walls="NS", tang="central", dro
         for n in ns:
             g = Grid(n, n)
             row = []
+            last_fp = {}
             for tag, kw in (("old", dict(robin_bc=False, uxb_at_wall=False)),
                             ("new", dict(robin_bc=True, uxb_at_wall=True))):
-                phi, ex = solve(g, sigma_fn, beta, 10000.0, 0.5, walls=walls, tang=tang, drop=drop, drop_fix=drop_fix, conv=conv, **kw)
+                common = dict(walls=walls, tang=tang, drop=drop, drop_fix=drop_fix, **kw)
+                if conv == "antidiff":
+                    # Deferred correction: the limiter is nonlinear, so it is iterated to
+                    # a fixed point, exactly as the Newton-Krylov outer loop would.
+                    phi, ex = solve(g, sigma_fn, beta, 10000.0, 0.5, conv="upwind", **common)
+                    for _ in range(ITERS):
+                        pn, ex = solve(g, sigma_fn, beta, 10000.0, 0.5, conv="antidiff",
+                                       phi_lag=phi, **common)
+                        dphi = np.max(np.abs(pn - phi)) / max(1e-30, np.max(np.abs(ex)))
+                        phi = pn
+                        if dphi < 1e-12:
+                            break
+                    last_fp[tag] = dphi
+                else:
+                    phi, ex = solve(g, sigma_fn, beta, 10000.0, 0.5, conv=conv, **common)
                 err = np.max(np.abs(phi - ex)) / max(1e-30, np.max(np.abs(ex)))
                 rate = np.log2(prev[tag] / err) if tag in prev else float("nan")
                 prev[tag] = err
                 row += [err, rate]
-            print(f"    {beta:6.1f} {n:5d} | {row[0]:12.3e} {row[1]:6.2f} | {row[2]:12.3e} {row[3]:6.2f}")
+            tailfp = ("   fixed point |dphi| " +
+                      " ".join(f"{v:.1e}" for v in last_fp.values())) if last_fp else ""
+            print(f"    {beta:6.1f} {n:5d} | {row[0]:12.3e} {row[1]:6.2f} |"
+                  f" {row[2]:12.3e} {row[3]:6.2f}{tailfp}")
 
 
 if __name__ == "__main__":
@@ -394,6 +486,8 @@ if __name__ == "__main__":
     # else.
     run("Test G'' - vertex sigma_H, CENTRAL face value in the convection term",
         cold, betas=(15.0,), walls="EW", drop=True, drop_fix="vertex", conv="central")
+    run("Test H - the same, with Parent's minmod ANTI-DIFFUSION (term 4), deferred",
+        cold, betas=(15.0,), walls="EW", drop=True, drop_fix="vertex", conv="antidiff")
     run("Test D - insulating ENDS, varying sigma",
         lambda x, y: 300.0 * (1.0 + 0.5 * np.sin(30.0 * x) * np.cos(60.0 * y)),
         betas=(15.0,), walls="EW")

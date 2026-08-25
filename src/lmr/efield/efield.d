@@ -1328,6 +1328,37 @@ class ElectricField {
                     phis[io] = phi;
                 }
 
+                // A SheathField/CircuitElectrode face reports phif = 0: the electrode's
+                // metal potential is not the plasma-edge value, so the face supplies no
+                // usable phi data point. Feeding that 0 into the reconstruction as if it
+                // were data puts a spurious phi = 0 Dirichlet half a cell away, and the
+                // gradient in the one cell row touching each electrode comes out
+                // ~phi_k/(h/2) -- three orders of magnitude too large, and of the wrong
+                // sign. The matrix assembly has reconstructed that missing point by linear
+                // extrapolation along the line to the opposite neighbour since the Hall
+                // terms first activated it; this routine never got the same treatment, so
+                // the *reported* E (which the UDF reads to build JxB and the Joule source)
+                // stayed wrong in exactly the cells where the current concentrates. Same
+                // reconstruction here:
+                //     phi_j ~= phi_k + t*(phi_opp - phi_k),  t = (d_j . d_opp)/|d_opp|^2,
+                // which is exact on constant and linear fields.
+                foreach(io, face; cell.iface){
+                    if (!face.is_on_boundary) continue;
+                    auto fbc = field_bcs[blkid][face.bc_id];
+                    if (((cast(SheathField) fbc) is null)
+                        && ((cast(CircuitElectrode) fbc) is null)) continue;
+                    size_t iopp = (io+2)%4;
+                    auto oface = cell.iface[iopp];
+                    bool opp_ok = !oface.is_on_boundary
+                        || field_bcs[blkid][oface.bc_id].isShared;
+                    double t = 0.0;   // fallback: mirror the cell value (constant-exact)
+                    if (opp_ok) {
+                        double dopp2 = dx[iopp]*dx[iopp] + dy[iopp]*dy[iopp];
+                        t = (dx[io]*dx[iopp] + dy[io]*dy[iopp])/dopp2;
+                    }
+                    phis[io] = (1.0-t)*cell.electric_potential.re + t*phis[iopp];
+                }
+
                 double dxN = dx[0]; double dyN = dy[0]; double nxN = nx[0]; double nyN = ny[0];
                 double dxE = dx[1]; double dyE = dy[1]; double nxE = nx[1]; double nyE = ny[1];
                 double dxS = dx[2]; double dyS = dy[2]; double nxS = nx[2]; double nyS = ny[2];

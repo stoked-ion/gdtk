@@ -400,6 +400,12 @@ void pushFluidCellToTable(lua_State* L, int tblIdx, ref const(FluidFVCell) cell,
     lua_pushnumber(L, cell.electric_potential); lua_setfield(L, tblIdx, "phi");
     lua_pushnumber(L, cell.electric_field[0]); lua_setfield(L, tblIdx, "Ex_solved");
     lua_pushnumber(L, cell.electric_field[1]); lua_setfield(L, tblIdx, "Ey_solved");
+    // The applied field AT THIS CELL. A UDF that builds J x B itself must use the same
+    // value the field solver used, or its current will not match the solved potential;
+    // with a tapered magnet (config.applied_B_ramp) a hard-coded constant in the UDF is
+    // wrong everywhere outside the flat region. Equals config.applied_Bz when no taper
+    // is configured.
+    lua_pushnumber(L, appliedBzAt(cell.pos[0].x.re)); lua_setfield(L, tblIdx, "Bz_applied");
 } // end pushFluidCellToTable()
 
 void pushFluidFaceToTable(lua_State* L, int tblIdx, ref const(FVInterface) face,

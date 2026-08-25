@@ -213,8 +213,12 @@ class ElectricField {
     */
     void computeHallVertexField(FluidBlock[] localFluidBlocks) {
         auto gmodel = GlobalConfig.gmodel_master;
-        double Bz_app = GlobalConfig.applied_Bz;
-        bool hall_on = GlobalConfig.electric_field_hall_effect && (Bz_app != 0.0);
+        // The NOMINAL field decides whether the Hall machinery runs at all; the LOCAL
+        // field (appliedBzAt) is what enters the physics, so a tapered magnet gives
+        // beta -> 0 outside it. With applied_B_ramp = 0 the two are identical everywhere
+        // and this is exactly the pre-existing path.
+        double Bz_nom = GlobalConfig.applied_Bz;
+        bool hall_on = GlobalConfig.electric_field_hall_effect && (Bz_nom != 0.0);
 
         if (sigmaH_cell.length != N) sigmaH_cell.length = N;
         sigmaH_cell[] = 0.0;
@@ -235,7 +239,8 @@ class ElectricField {
             foreach(cell; block.cells){
                 int k = cell.id + block_offsets[blkid];
                 double sig = conductivity(cell.fs.gas, cell.pos[0], gmodel).re;
-                double beta = conductivity.hall_beta(cell.fs.gas, gmodel, Bz_app);
+                double beta = conductivity.hall_beta(cell.fs.gas, gmodel,
+                                                     appliedBzAt(cell.pos[0].x.re));
                 sigmaH_cell[k] = sig*beta/(1.0 + beta*beta);
             }
         }
@@ -547,8 +552,8 @@ class ElectricField {
                     throw new Error(errMsg);
                 }
 
-                double Bz_app = GlobalConfig.applied_Bz;
-                bool hall_on = GlobalConfig.electric_field_hall_effect && (Bz_app != 0.0);
+                double Bz_nom = GlobalConfig.applied_Bz;
+                bool hall_on = GlobalConfig.electric_field_hall_effect && (Bz_nom != 0.0);
 
                 // ---------------------------------------------------------------------
                 // PATH 2: the insulating-wall boundary condition for the FULL tensor.
@@ -592,20 +597,21 @@ class ElectricField {
                 // UPWIND ONLY. `central` keeps the historical dphi/dn = 0 wall so that
                 // every established result stays bit-identical.
                 double robin_gx = 0.0, robin_gy = 0.0;
-                if (!hall_scheme_central && insulator_emf && wall_io >= 0 && Bz_app != 0.0) {
+                if (!hall_scheme_central && insulator_emf && wall_io >= 0 && Bz_nom != 0.0) {
                     auto wface = cell.iface[wall_io];
+                    double Bz_wall = appliedBzAt(wface.pos.x.re);
                     double wsign = cell.outsign[wall_io];
                     double wnx = wsign*wface.n.x.re;
                     double wny = wsign*wface.n.y.re;
                     double wtx =  wny;
                     double wty = -wnx;
                     double wbeta = (hall_on && insulator_tensor) ?
-                        conductivity.hall_beta(wface.fs.gas, gmodel, Bz_app) : 0.0;
+                        conductivity.hall_beta(wface.fs.gas, gmodel, Bz_wall) : 0.0;
                     // (u x B) = (uy*Bz, -ux*Bz, 0)
                     double wux = wface.fs.vel.x.re;
                     double wuy = wface.fs.vel.y.re;
-                    double exn = Bz_app*(wuy*wnx - wux*wny);
-                    double ext = Bz_app*(wuy*wtx - wux*wty);
+                    double exn = Bz_wall*(wuy*wnx - wux*wny);
+                    double ext = Bz_wall*(wuy*wtx - wux*wty);
                     double s_bc = exn + wbeta*ext;
                     double gamma = _Cx*wtx + _Cy*wty;
                     double den = 1.0 + wbeta*gamma;
@@ -713,6 +719,8 @@ class ElectricField {
                     // beta_rot (gated) drives only the tensor rotation. Folding both into one
                     // gated beta means a gated face silently reverts to the UNMAGNETISED
                     // sigma -- a factor 1+beta^2 (~226 at beta=15) once the tensor is split.
+                    // Local applied field: constant unless a magnet taper is configured.
+                    double Bz_app = appliedBzAt(face.pos.x.re);
                     double beta_full = conductivity.hall_beta(face.fs.gas, gmodel, Bz_app);
                     double beta     = hall_scheme_central ? ((hall_face) ? beta_full : 0.0)
                                                           : ((hall_on)   ? beta_full : 0.0);
@@ -1493,9 +1501,10 @@ class ElectricField {
                 // g_n*C correction here; otherwise the reported field (and the boundary
                 // current computed from it) would disagree with the operator that
                 // produced phi. `central` is left exactly as it was.
-                double Bz_e = GlobalConfig.applied_Bz;
-                if (!hall_scheme_central && insulator_emf && wall_io >= 0 && Bz_e != 0.0) {
+                if (!hall_scheme_central && insulator_emf && wall_io >= 0
+                    && GlobalConfig.applied_Bz != 0.0) {
                     auto wface = cell.iface[wall_io];
+                    double Bz_e = appliedBzAt(wface.pos.x.re);
                     double wsign = cell.outsign[wall_io];
                     double wnx = wsign*wface.n.x.re;
                     double wny = wsign*wface.n.y.re;

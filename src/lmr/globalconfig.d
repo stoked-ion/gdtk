@@ -24,6 +24,7 @@ import std.conv;
 import std.file;
 import std.format;
 import std.json;
+import std.math : tanh;
 import std.stdio;
 import std.string;
 import std.typecons;
@@ -1219,7 +1220,19 @@ final class GlobalConfig {
     // Activate the electric field solver by Nick Gibbons
     shared static int electric_field_count = 1000000000;
     shared static double electric_field_start_time = 0.0; // defer the field solve until this sim time
-    shared static double applied_Bz = 0.0; // uniform applied B (z) for the low-Rm efield uxB source
+    shared static double applied_Bz = 0.0; // applied B (z) for the low-Rm efield uxB source
+    // Axial profile for the applied field. A real magnet does not extend to the ends of
+    // the duct: outside it the gas is unmagnetised, beta -> 0, and the Hall current has
+    // nowhere to be turned. Modelling B as one number all the way to an insulating outflow
+    // instead forces the whole axial Hall current to turn inside the last cells, which is
+    // a real effect but an artefact of the truncation rather than of the device.
+    //   B(x) = applied_Bz * 0.5*(tanh((x-x0)/L) + tanh((x1-x)/L))
+    // the standard fringe-field window: ~applied_Bz between x0 and x1, half that at each
+    // edge, falling off over L. applied_B_ramp = 0 (the default) means a uniform field and
+    // takes exactly the pre-existing code path.
+    shared static double applied_B_ramp = 0.0;  // 0 => uniform, as before
+    shared static double applied_B_x0 = 0.0;    // upstream edge of the magnet
+    shared static double applied_B_x1 = 0.0;    // downstream edge
     shared static int electric_field_gmres_iters = -1;
     // Freeze the solved field through the Newton-Krylov linear solve: solve it at the
     // base residual (ftl==0) and reuse it for the Frechet/Jacobian-vector evaluations
@@ -2099,6 +2112,9 @@ void set_config_for_core(JSONValue jsonData)
     mixin(update_int("electric_field_count", "electric_field_count"));
     mixin(update_double("electric_field_start_time", "electric_field_start_time"));
     mixin(update_double("applied_Bz", "applied_Bz"));
+    mixin(update_double("applied_B_ramp", "applied_B_ramp"));
+    mixin(update_double("applied_B_x0", "applied_B_x0"));
+    mixin(update_double("applied_B_x1", "applied_B_x1"));
     mixin(update_int("electric_field_gmres_iters", "electric_field_gmres_iters"));
     mixin(update_bool("electric_field_freeze_in_linear_solve", "electric_field_freeze_in_linear_solve"));
     mixin(update_int("electric_field_start_step", "electric_field_start_step"));
@@ -2872,3 +2888,28 @@ void registerGlobalConfig(lua_State* L)
     lua_pushcfunction(L, &getGasModel);
     lua_setglobal(L, "getGasModel");
 } // end registerGlobalConfig()
+
+
+/**
+ * The applied magnetic field (z component) at an axial station.
+ *
+ * `GlobalConfig.applied_B_ramp = 0` -- the default -- returns the single configured value
+ * everywhere, which is bit-for-bit the behaviour that existed before the profile was added.
+ * A non-zero ramp gives the usual fringe-field window,
+ *
+ *     B(x) = applied_Bz * 0.5*(tanh((x-x0)/L) + tanh((x1-x)/L)),
+ *
+ * i.e. ~applied_Bz between the magnet edges x0 and x1, half of it at each edge, decaying
+ * over L outside. That matters at high Hall parameter: with a uniform field running all the
+ * way to an insulating outflow, the entire axial Hall current has to be turned around
+ * inside the last cells. Letting B fall off before the boundary removes the concentration
+ * instead of merely resolving it, and is what the hardware actually does.
+ */
+@nogc
+double appliedBzAt(double x)
+{
+    double L = GlobalConfig.applied_B_ramp;
+    if (L <= 0.0) return GlobalConfig.applied_Bz;
+    return GlobalConfig.applied_Bz*0.5*(tanh((x - GlobalConfig.applied_B_x0)/L)
+                                      + tanh((GlobalConfig.applied_B_x1 - x)/L));
+}

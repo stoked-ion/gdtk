@@ -133,6 +133,20 @@ The field solve needs a boundary condition at each electrode. Three exist, in in
 
 Implementation: the electrode unknowns border the existing 5-band matrix, and the augmented system is solved by a Woodbury/Schur complement (`schurSolve`) — `K+1` solves of the *unmodified* banded operator, so the existing GMRES/ILU path is untouched. Measured cost ≈1.23×/step for `K=2`. With no circuit declared, the code takes exactly the pre-existing path. Correctness anchor: a Faraday case re-expressed as `CircuitElectrode` with `R → 0` reproduces the `SheathField` result to 0.05% in F_x and total current — kept as Tier 0 of the project regression suite.
 
+#### A non-uniform applied magnetic field (`config.applied_B_ramp`)
+
+`config.applied_Bz` is the peak field. By default it applies everywhere, which is fine at low Hall parameter but not at high: a uniform field running to an insulating outflow forces the whole axial Hall current to turn around inside the last cells, giving a current concentration that is real physics but an artefact of truncating the duct rather than a property of the device. Set `applied_B_ramp` (and `applied_B_x0`/`applied_B_x1`) for the usual fringe-field window
+
+```
+B(x) = applied_Bz * 0.5*(tanh((x - x0)/L) + tanh((x1 - x)/L))
+```
+
+— roughly `applied_Bz` between the magnet edges, half of it at each edge, decaying over `L`. `applied_B_ramp = 0` (the default) returns the constant everywhere and takes exactly the pre-existing code path. Measured on C6_pow at β≈15: the peak `|J|`-to-bulk ratio falls monotonically with taper length (59 → 11 → 9.4 → 6.3 → 4.8 for L = 0, 4, 4, 8, 12 mm) and the maximum moves off the boundary onto the magnet edge.
+
+**A UDF that forms J×B itself must read `cell.Bz_applied`, not a hard-coded constant** — otherwise its current disagrees with the solved potential everywhere outside the flat region. It equals `config.applied_Bz` when no taper is set.
+
+Confining the field changes the answer substantially, not marginally: on C6_pow the total Joule power went from 143 kW/m (uniform field) to 1133 kW/m, because the untapered ends were shorting out the Hall EMF. Expect a case that switches the field on mid-run to need a first-order, low-CFL Newton-Krylov phase at the switch-on step to absorb it.
+
 #### Hall discretisation and the insulator boundary condition (`LMR_HALL_SCHEME`, `LMR_INSULATOR_BC`)
 
 Two environment switches select how the Hall (skew) part of the conductivity tensor is discretised. Both default to the historical behaviour, and every established result on this branch was produced with the defaults — a fresh converged `C6_pow` run under `central` with all of the below in place reproduces the stored golden F_x, F_y, Δu, I and η to 0.000%.

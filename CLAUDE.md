@@ -145,7 +145,19 @@ B(x) = applied_Bz * 0.5*(tanh((x - x0)/L) + tanh((x1 - x)/L))
 
 **A UDF that forms J×B itself must read `cell.Bz_applied`, not a hard-coded constant** — otherwise its current disagrees with the solved potential everywhere outside the flat region. It equals `config.applied_Bz` when no taper is set.
 
-Confining the field changes the answer substantially, not marginally: on C6_pow the total Joule power went from 143 kW/m (uniform field) to 1133 kW/m, because the untapered ends were shorting out the Hall EMF. Expect a case that switches the field on mid-run to need a first-order, low-CFL Newton-Krylov phase at the switch-on step to absorb it.
+**Check B/B0 at the electrodes before interpreting a taper run.** A magnet that leaves electrodes outside the field is not a small perturbation: with the first and last electrode pairs at B/B0 = 0.03–0.22, C6's F_x collapses by 93%, because an unmagnetised electrode shorts the plasma while generating no EMF.
+
+With the magnet covering the electrodes and rolling off before the duct exit, two converged runs at β≈2.85 differ only in the field profile: F_x 179.5 → 137.8 N/m (−23%), I −23%, Δu −17%, P_J 476 → 570 kW/m (+20%). **The uniform-field idealisation overstates thrust and current by roughly a quarter and understates dissipation by a fifth.**
+
+Switching a large source on mid-run needs three things beyond the profile itself: a step-based ramp in the UDF (`cell.step`, since the steady solver passes `t = -1`), a first-order low-CFL Newton-Krylov phase to absorb the transition, and `reset_reference_residuals = true` on the phase *after* the ramp — otherwise the auto-CFL stays frozen (see below). With all of these, C6 runs at β≈16 in second order.
+
+#### Switching a source on part-way through a steady run
+
+Three separate traps, all of which bite together:
+
+- **The steady solver passes `t = -1`**, so a UDF source ramped on physical time evaluates to zero for the whole run. Ramp on **`cell.step`** instead (available in the source-terms table; it is the Newton step in a steady run, the time step in a transient one). Use a smoothstep — a linear ramp puts a kink in the residual at each end, which a Newton solver feels.
+- **The auto-CFL is frozen for the rest of the run.** `ResidualBasedAutoCFL` returns the current CFL unchanged while the *relative* residual exceeds the growth threshold, and the reference residuals are taken over the first ~10 steps, before the source exists. Afterwards the relative residual sits at 1e4–1e6 permanently. Set **`reset_reference_residuals = true`** on a `NewtonKrylovPhase` to re-take them — on the phase that begins *after* the ramp finishes, not where it starts (ten steps into a 600-step ramp captures 1.7% of the source and the relative residual plateaus near 500). Then restore the growth threshold to the default ~0.99, since the relative residual starts from 1 again. Note this also changes what `stop_on_relative_residual` means.
+- **Second-order reconstruction may not survive the transition.** The signature is `update_thermo_from_rhou` reporting negative internal energy. A first-order, working-CFL phase spanning the ramp and the relaxation after it is the fix; `extrema_clipping` does not help, and `thermo_interpolator = "pT"` removes the hard failure but not the underlying stiffness.
 
 #### Hall discretisation and the insulator boundary condition (`LMR_HALL_SCHEME`, `LMR_INSULATOR_BC`)
 

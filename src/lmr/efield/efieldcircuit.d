@@ -212,6 +212,29 @@ class ExternalCircuit {
 
     // ---- state -------------------------------------------------------------
     @property size_t nnodes() const { return nodes.length; }
+
+    /**
+     * Total electrical power delivered by the supplies, and the current in each supply
+     * leg, given the solved node potentials.
+     *
+     * The leg current is (V_supply - q_a)/R, positive into the node, so the power the
+     * supply delivers is V_supply times that. This is the only place the SUPPLIED power
+     * can be got exactly: it is topology dependent, and V*|I| with a single nominal V is
+     * only a proxy that happens to be right for a two-terminal connection. Comparing
+     * electrode configurations -- Faraday against Hall against diagonal -- needs the real
+     * number, because those topologies differ in precisely this.
+     */
+    double supplyPower(ref double[] legCurrents) const {
+        legCurrents.length = 0;
+        double P = 0.0;
+        foreach (r; resistors) {
+            if (r.b >= 0) continue;                 // node-to-node, not a supply leg
+            double I = (r.V_supply - _q[r.a])/r.R;  // A per metre of depth, into the node
+            legCurrents ~= I;
+            P += r.V_supply*I;
+        }
+        return P;
+    }
     @property const(double)[] q() const { return _q; }
     void setQ(const double[] qnew) {
         if (qnew.length != _q.length)

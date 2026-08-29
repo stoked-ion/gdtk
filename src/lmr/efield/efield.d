@@ -1252,6 +1252,23 @@ class ElectricField {
                 writefln("   phi in [%.6g, %.6g]", pmin, pmax);
                 circuit_solve_count++;
             }
+            // Periodic state report. The first-few-solves diagnostic above catches a
+            // mis-assembled circuit; this one is for reading the CONVERGED state off the
+            // end of a run -- node potentials, supply-leg currents and the total supplied
+            // power, which is topology dependent and cannot be reconstructed afterwards
+            // from the flow field alone.
+            if (circuit_solve_count >= 3 && (circuit_solve_count % 500) == 0
+                && GlobalConfig.is_master_task) {
+                double[] legI;
+                double Psup = circuit.supplyPower(legI);
+                writef("  [efield/circuit] state @solve %d:", circuit_solve_count);
+                foreach (m; 0 .. K) writef(" q[%d]=%.6g", m, qsol[m]);
+                writef("  legI=");
+                foreach (i, Il; legI) writef("%s%.6g", i ? "," : "", Il);
+                writefln("  P_supply=%.6g W/m", Psup);
+                stdout.flush();
+            }
+            if (circuit_solve_count >= 3) circuit_solve_count++;
             if (verbose) {
                 writef("    circuit node potentials:");
                 foreach (m; 0 .. K) writef(" q[%d]=%.6g", m, qsol[m]);

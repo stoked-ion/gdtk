@@ -37,11 +37,11 @@ function output.write_control_file(fileName)
 end
 
 -- Serialize config.external_circuit (a table, or nil) to JSON for the D side.
--- nil or an empty table yields {"nodes": [], "resistors": []}, which the solver
+-- nil or an empty table yields empty arrays, which the solver
 -- treats as "no circuit" and takes its usual code path.
 local function externalCircuitToJSON(ck)
    if ck == nil or ck.nodes == nil or #ck.nodes == 0 then
-      return '{"nodes": [], "resistors": []}'
+      return '{"nodes": [], "resistors": [], "sources": []}'
    end
    local ns = {}
    for _, n in ipairs(ck.nodes or {}) do
@@ -58,8 +58,13 @@ local function externalCircuitToJSON(ck)
                                    r.a, r.R, r.V_supply or 0.0)
       end
    end
-   return string.format('{"nodes": [%s], "resistors": [%s]}',
-                        table.concat(ns, ", "), table.concat(rs, ", "))
+   local ss = {}
+   for _, c in ipairs(ck.sources or {}) do
+      ss[#ss+1] = string.format('{"a": %d, "I_supply": %.18e}', c.a, c.I_supply or 0.0)
+   end
+   return string.format('{"nodes": [%s], "resistors": [%s], "sources": [%s]}',
+                        table.concat(ns, ", "), table.concat(rs, ", "),
+                        table.concat(ss, ", "))
 end
 
 function output.write_config_file(fileName)

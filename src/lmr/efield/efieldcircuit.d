@@ -68,6 +68,25 @@ struct CircuitResistor {
     double V_supply;   // only meaningful when b < 0
 }
 
+/**
+ * A current source injecting I_supply (A per metre of depth) into node `a`.
+ *
+ * Real Hall accelerators are driven current-controlled, not voltage-controlled, and the
+ * distinction is not cosmetic here: with a voltage source the terminal sheaths absorb almost
+ * all of the applied drive (measured: 94% of it, leaving the plasma only 6%), so a
+ * voltage-driven Hall connection is sheath-limited rather than field-limited. Specifying the
+ * current instead moves the sheath drop into the *answer* rather than the input.
+ *
+ * A current source contributes ONLY to the right-hand side -- it adds no conductance -- so it
+ * cannot anchor the potential level. A current-driven circuit therefore still needs one
+ * voltage reference; use a high-resistance supply leg, which fixes the gauge while carrying
+ * negligible current.
+ */
+struct CircuitCurrentSource {
+    int a;
+    double I_supply;
+}
+
 class ExternalCircuit {
     this() {}
 
@@ -91,6 +110,11 @@ class ExternalCircuit {
         resistors ~= CircuitResistor(a, -1, R, V_supply);
     }
 
+    void addCurrentSource(int a, double I_supply) {
+        checkNode(a);
+        sources ~= CircuitCurrentSource(a, I_supply);
+    }
+
     // ---- the nodal-analysis stamp ------------------------------------------
     /*
         Build the K x K conductance matrix L and the K-vector c of independent
@@ -111,6 +135,8 @@ class ExternalCircuit {
               L[a,a] += 1/R ;  L[b,b] += 1/R ;  L[a,b] -= 1/R ;  L[b,a] -= 1/R
           supply leg R from node a to a source held at V:
               L[a,a] += 1/R ;  c[a]   += V/R
+          current source injecting I into node a:
+              c[a] += I                       (no conductance -- see CircuitCurrentSource)
 
         L is returned row-major, length K*K. Both L and c are ZEROED here, so the
         caller must add the plasma contributions AFTER calling this.
@@ -132,6 +158,7 @@ class ExternalCircuit {
                 L[r.b*K + r.a] -= g;
             }
         }
+        foreach (src; sources) c[src.a] += src.I_supply;
     }
 
     /*
@@ -165,6 +192,11 @@ class ExternalCircuit {
         zero. Requiring a resistive path to a supply for EVERY node -- as this check
         originally did -- would have rejected exactly the topology the Hall case
         needs.
+
+        Current sources do NOT count for this: they stamp only the right-hand side, so
+        adding a constant to every potential still leaves the system unchanged. A
+        current-driven circuit needs a voltage reference, and the natural one is a
+        high-resistance supply leg -- it sets the level while drawing almost no current.
 
         What is still genuinely required is at least ONE supply leg somewhere in the
         circuit. Without it, nothing anchors the absolute level: the sheath stamps
@@ -224,6 +256,13 @@ class ExternalCircuit {
      * electrode configurations -- Faraday against Hall against diagonal -- needs the real
      * number, because those topologies differ in precisely this.
      */
+    /// Total current injected by the current sources (A per metre of depth).
+    double sourceCurrent() const {
+        double I = 0.0;
+        foreach (src; sources) if (src.I_supply > 0.0) I += src.I_supply;
+        return I;
+    }
+
     double supplyPower(ref double[] legCurrents) const {
         legCurrents.length = 0;
         double P = 0.0;
@@ -270,13 +309,15 @@ private:
 
     CircuitNode[] nodes;
     CircuitResistor[] resistors;
+    CircuitCurrentSource[] sources;
     double[] _q;
 }
 
 /*
     Build an ExternalCircuit from the config JSON emitted by output.lua:
         {"nodes": [{"nominal_voltage": .., "label": ".."}, ..],
-         "resistors": [{"a": i, "b": j, "R": .., "V_supply": ..}, ..]}
+         "resistors": [{"a": i, "b": j, "R": .., "V_supply": ..}, ..],
+         "sources":   [{"a": i, "I_supply": ..}, ..]}
     b < 0 marks a leg to a fixed supply. Returns null when there are no nodes, which
     is the signal to the field solver to take its ordinary (non-circuit) path.
 */
@@ -297,6 +338,12 @@ ExternalCircuit create_external_circuit(string json_text)
         double v = ("nominal_voltage" in n) ? n["nominal_voltage"].get!double : 0.0;
         string lab = ("label" in n) ? n["label"].str : "";
         ck.addNode(v, lab);
+    }
+    if ("sources" in j && j["sources"].type == JSONType.array) {
+        foreach (src; j["sources"].array) {
+            ck.addCurrentSource(src["a"].get!int,
+                                ("I_supply" in src) ? src["I_supply"].get!double : 0.0);
+        }
     }
     if ("resistors" in j && j["resistors"].type == JSONType.array) {
         foreach (r; j["resistors"].array) {

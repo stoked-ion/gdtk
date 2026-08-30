@@ -1265,7 +1265,10 @@ class ElectricField {
                 foreach (m; 0 .. K) writef(" q[%d]=%.6g", m, qsol[m]);
                 writef("  legI=");
                 foreach (i, Il; legI) writef("%s%.6g", i ? "," : "", Il);
-                writefln("  P_supply=%.6g W/m", Psup);
+                writef("  P_supply=%.6g W/m", Psup);
+                double Isrc = circuit.sourceCurrent();
+                if (Isrc != 0.0) writef("  I_source=%.6g A/m", Isrc);
+                writeln();
                 stdout.flush();
             }
             if (circuit_solve_count >= 3) circuit_solve_count++;

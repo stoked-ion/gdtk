@@ -22,6 +22,7 @@ import gas.gas_model;
 import lmr.bc.boundary_condition;
 import lmr.bc.ghost_cell_effect.full_face_copy;
 import lmr.efield.efieldcircuit;
+import lmr.globaldata : SimState;
 import lmr.efield.efieldconductivity;
 import lmr.efield.efieldsheath;
 import lmr.globalconfig;
@@ -122,7 +123,8 @@ class SheathField : FieldBC {
 */
     this(double Velectrode, SheathModel model,
          double segment_pitch=0.0, double segment_fill=1.0, double segment_x0=0.0,
-         double Ex_applied=0.0, double Ex_quad=0.0, double Ex_cube=0.0) {
+         double Ex_applied=0.0, double Ex_quad=0.0, double Ex_cube=0.0,
+         double Ex_ramp_steps=0.0, double Ex_ramp_start=0.0) {
         this.Velectrode = Velectrode;
         this.model = model;
         this.segment_pitch = segment_pitch;
@@ -131,6 +133,32 @@ class SheathField : FieldBC {
         this.Ex_applied = Ex_applied;
         this.Ex_quad = Ex_quad;
         this.Ex_cube = Ex_cube;
+        this.Ex_ramp_steps = Ex_ramp_steps;
+        this.Ex_ramp_start = Ex_ramp_start;
+    }
+
+    /*
+        Fraction of the axial tilt currently applied.
+
+        A tilt is a large perturbation: at condition 6 the tilt matching tan(theta) = beta is
+        1838 V across a duct driven at 400 V. Imposing it in one step destroys the solve even
+        when restarting from a fully converged field and running first order -- measured, the
+        run dies within ten steps. Ramping it over a few hundred Newton steps is the same
+        remedy the deferred UDF source terms need, and for the same reason.
+
+        The steady solver passes SimState.time = -1, so the ramp is on SimState.step. A
+        smoothstep is used rather than a linear ramp: a linear one puts a kink in the
+        residual at each end, which a Newton solver feels.
+
+        Ex_ramp_steps <= 0 (the default) means no ramp, and the expression below reduces
+        exactly to the previous behaviour.
+    */
+    @nogc final double Ex_ramp_factor() const {
+        if (!(Ex_ramp_steps > 0.0)) return 1.0;
+        double t = (cast(double) SimState.step - Ex_ramp_start)/Ex_ramp_steps;
+        if (t <= 0.0) return 0.0;
+        if (t >= 1.0) return 1.0;
+        return t*t*(3.0 - 2.0*t);
     }
 
     /*
@@ -149,7 +177,7 @@ class SheathField : FieldBC {
     */
     @nogc final double Velectrode_at(const FVInterface face) const {
         double dx = face.pos.x.re - segment_x0;
-        return Velectrode + dx*(Ex_applied + dx*(Ex_quad + dx*Ex_cube));
+        return Velectrode + Ex_ramp_factor()*dx*(Ex_applied + dx*(Ex_quad + dx*Ex_cube));
     }
 
     /*
@@ -206,13 +234,16 @@ class SheathField : FieldBC {
         b_rhs  = S*(J0 - Jp*phi_cell);
     }
     override string toString() const {
-        return format("SheathField(Velectrode=%g, segment_pitch=%g, segment_fill=%g, Ex_applied=%g, Ex_quad=%g, Ex_cube=%g)",
-                      Velectrode, segment_pitch, segment_fill, Ex_applied, Ex_quad, Ex_cube);
+        return format("SheathField(Velectrode=%g, segment_pitch=%g, segment_fill=%g, Ex_applied=%g,"
+                      ~ " Ex_quad=%g, Ex_cube=%g, Ex_ramp_steps=%g, Ex_ramp_start=%g)",
+                      Velectrode, segment_pitch, segment_fill, Ex_applied, Ex_quad, Ex_cube,
+                      Ex_ramp_steps, Ex_ramp_start);
     }
 private:
     double Velectrode;
     SheathModel model;
     double segment_pitch, segment_fill, segment_x0, Ex_applied, Ex_quad, Ex_cube;
+    double Ex_ramp_steps, Ex_ramp_start;
 }
 
 class CircuitElectrode : FieldBC {
@@ -679,8 +710,11 @@ FieldBC create_field_bc(JSONValue field_bc_json, const BoundaryCondition bc, con
         double Ex_applied = getJSONdouble(field_bc_json, "Ex_applied", 0.0);
         double Ex_quad = getJSONdouble(field_bc_json, "Ex_quad", 0.0);
         double Ex_cube = getJSONdouble(field_bc_json, "Ex_cube", 0.0);
+        double Ex_ramp_steps = getJSONdouble(field_bc_json, "Ex_ramp_steps", 0.0);
+        double Ex_ramp_start = getJSONdouble(field_bc_json, "Ex_ramp_start", 0.0);
         field_bc = new SheathField(Velectrode, create_sheath_model(sheath_model, field_bc_json),
-                                   segment_pitch, segment_fill, segment_x0, Ex_applied, Ex_quad, Ex_cube);
+                                   segment_pitch, segment_fill, segment_x0, Ex_applied, Ex_quad,
+                                   Ex_cube, Ex_ramp_steps, Ex_ramp_start);
         break;
     case "CircuitElectrode":
         if (circuit is null)

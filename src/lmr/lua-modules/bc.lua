@@ -688,7 +688,12 @@ end
 SheathField = FieldBoundary:new{Velectrode=0.0, sheath_model="linear",
                                 Rsheath=1.0, Vfall=0.0, K=1.0e-3, leak=1.0e-6, dV_lin=1.0,
                                 segment_pitch=0.0, segment_fill=1.0, segment_x0=0.0,
-                                Ex_applied=0.0, Ex_quad=0.0, Ex_cube=0.0}
+                                Ex_applied=0.0, Ex_quad=0.0, Ex_cube=0.0,
+                                -- A tilt is a large perturbation and generally cannot be
+                                -- imposed in one step. Ex_ramp_steps > 0 ramps it in with a
+                                -- smoothstep over that many Newton steps, beginning at
+                                -- Ex_ramp_start. 0 (the default) applies it immediately.
+                                Ex_ramp_steps=0.0, Ex_ramp_start=0.0}
 SheathField.name = "SheathField"
 function SheathField:new(o)
    o = FieldBoundary.new(self, o)
@@ -708,7 +713,9 @@ function SheathField:tojson()
    str = str .. string.format('"segment_x0": %.18e, ', self.segment_x0)
    str = str .. string.format('"Ex_applied": %.18e, ', self.Ex_applied)
    str = str .. string.format('"Ex_quad": %.18e, ', self.Ex_quad)
-   str = str .. string.format('"Ex_cube": %.18e', self.Ex_cube)
+   str = str .. string.format('"Ex_cube": %.18e, ', self.Ex_cube)
+   str = str .. string.format('"Ex_ramp_steps": %.18e, ', self.Ex_ramp_steps)
+   str = str .. string.format('"Ex_ramp_start": %.18e', self.Ex_ramp_start)
    str = str .. '}'
    return str
 end

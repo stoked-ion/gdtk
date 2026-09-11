@@ -1,0 +1,23 @@
+# Freestream.
+T_INF = 0.0
+U_INF = 0.0
+RHO_INF = 0.0
+MASS_FRAC = {air = 1}
+
+# Geometry.
+RADIUS = 0.0127
+DOMAIN = 0.0
+
+# Models.
+GAS_MODEL = "air-ideal.gas"
+
+# Grid.
+CELLS = 100
+
+# Time stepping.
+LTS = true
+
+# Output.
+SAVE = "ncb.dat"
+PLOT = true
+VERBOSE = false

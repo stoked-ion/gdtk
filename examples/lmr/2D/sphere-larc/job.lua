@@ -92,7 +92,7 @@ config.interpolation_order         = 2
 config.inviscid_least_squares_type = "unweighted_qr"
 config.extrema_clipping            = false
 config.thermo_interpolator         = "rhop"
-config.unstructured_limiter        = "hvenkat"
+config.unstructured_limiter        = "hvenkat2"
 config.smooth_limiter_coeff        = 1.0
 config.apply_unstructured_limiter_stagnation_point_filter = true
 

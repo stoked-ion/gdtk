@@ -1,0 +1,36 @@
+# Freestream.
+T_INF = 727.31
+P_INF = 578.3129
+U_INF = 16023.0
+MASS_FRAC = {H2 = 0.43, He = 0.57}
+
+# Geometry.
+RADIUS = 0.02
+DOMAIN = 0.005
+AXISYMMETRIC = false
+
+# Models.
+GAS_MODEL = "gas-giant-3sp.gas"
+CHEM_MODEL = "gas-giant-3sp.chem"
+
+# Grid.
+CELLS = 500
+CLUSTERING = 1.1
+
+# Wall.
+T_WALL = 300.0
+VISCOSITY = true
+SENSOR = false
+CATALYTIC = "fixed_composition"
+WALL_MASS_FRAC = {H2 = 0.43, He = 0.57}
+LEWIS_NUM = 1.0
+
+# Time stepping.
+T_END = {steady = 1e-2}
+CFL_d = 0.1
+LTS = true
+
+# Output.
+SAVE = "uren.dat"
+PLOT = true
+VERBOSE = true

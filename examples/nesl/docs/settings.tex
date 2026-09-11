@@ -1,0 +1,581 @@
+\documentclass[10pt,a4paper]{article}
+
+% Standard packages.
+\usepackage{lmodern}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage[margin=1in]{geometry}
+\usepackage{booktabs}
+\usepackage{longtable}
+\usepackage{array}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage[most]{tcolorbox}
+\usepackage{microtype}
+\usepackage[hidelinks]{hyperref}
+\usepackage{parskip}
+
+% Define some colours, got from eye dropper on the user guide for SLF.
+\definecolor{shadecolor}{RGB}{248,248,248}
+\definecolor{codekey}{RGB}{5,41,125}
+\definecolor{codestring}{RGB}{64,112,160}
+\definecolor{codecomment}{RGB}{97,161,176}
+\definecolor{codebool}{RGB}{0,112,33}
+
+% Stop -- turning into en-dash in plain text, for CLI commands.
+\DisableLigatures[-]{encoding = T1, family = tt*}
+
+% Allows underscores to override line breaks in longtable.
+\let\origunderscore\_
+\renewcommand{\_}{\origunderscore\penalty4000\relax}
+\newcolumntype{L}[1]{>{\raggedright\arraybackslash}p{#1}}
+
+% Loosen tolerance for line breaking.
+\tolerance=1200
+\setlength{\emergencystretch}{3em}
+
+% Settings to make code blocks look like TOML.
+\lstdefinestyle{toml}{
+    basicstyle=\ttfamily\small,
+    commentstyle=\color{codecomment}\itshape,
+    morecomment=[l]{\#},
+    morestring=[b]",
+    morestring=[b]',
+    stringstyle=\color{codestring},
+    alsoletter={_},
+    emph={GAS_MODEL,CHEM_MODEL, EXCHANGE_MODEL, MASS_FRAC,
+    WALL_MASS_FRAC, RECOM_RATE, T_INF, P_INF, RHO_INF, U_INF,
+    RADIUS, DOMAIN, CELLS, AXISYMMETRIC, T_WALL, VISCOSITY,
+    SENSOR, LEWIS_NUM, CATALYTIC, CLUSTERING, T_END, MAX_ITERS,
+    CFL_c, CFL_d, LTS, HOT_START, SAVE, PLOT, VERBOSE, T_BOUND,
+    U_BOUND, P_BOUND, RHO_BOUND, PERMUTATIONS, DOMAIN_SCALE,
+    FIXED_DOMAIN, efficiency, product, steady, path, interval,
+    lower, upper, cells, bound_type},
+    emphstyle={\color{codekey}},
+    emph=[2]{true,false},
+    emphstyle=[2]{\color{codebool}\bfseries},
+    frame=none,
+    showstringspaces=false,
+    columns=fullflexible,
+    keepspaces=true,
+    breaklines=true,
+}
+\lstdefinestyle{plain}{
+    basicstyle=\ttfamily\small,
+    emph={},
+    emph=[2]{},
+    frame=none,
+    columns=fullflexible,
+    keepspaces=true,
+    breaklines=true,
+}
+\lstset{style=toml}
+
+% Put a shaded box around listings.
+\tcolorboxenvironment{lstlisting}{
+    breakable,
+    colback=shadecolor,
+    colframe=shadecolor,
+    boxrule=0pt,
+    arc=4pt, outer arc=4pt,
+    boxsep=0pt,
+    left=6pt, right=6pt, top=6pt, bottom=6pt,
+    grow to left by=6pt, grow to right by=6pt,
+    before skip=8pt, after skip=8pt,
+}
+
+%+++++++++++++++++++++++++++++++++++++++++++++
+%             Preamble ends here
+%+++++++++++++++++++++++++++++++++++++++++++++
+
+\title{NESL and NCB: Reference Manual}
+\author{\textit{Taine J. Rossini}}
+\date{Version 1.0.0.}
+
+\begin{document}
+\maketitle
+
+\section*{Abstract}
+
+This document lists every setting recognised by \texttt{nesl}, the stagnation-line solver, and \texttt{nesl\_condition\_builder}, hereafter \texttt{ncb}, the parallel condition builder. Anything not listed here is ignored.
+
+% \tableofcontents
+
+\section*{Command line}
+
+\subsection*{NESL}
+
+\begin{lstlisting}[style=plain]
+nesl [option]
+
+    --help          Displays the help message and exits.
+    --job=<file>    Runs a simulation using a .toml configuration file.
+    --grid=<file>   Builds the grid from a .toml configuration file and exits.
+\end{lstlisting}
+
+One option is given per run.
+
+\begin{itemize}
+    \item \textbf{\texttt{--job=<file>}} runs the simulation described by the configuration file.
+    \item \textbf{\texttt{--grid=<file>}} builds the grid from the same configuration file, writes \texttt{grid.png} and \texttt{grid.vtk}, and quits without solving the flow.
+    \item Running with no argument, or with \texttt{--help}, prints the banner and exits.
+\end{itemize}
+
+\subsection*{NCB}
+
+\begin{lstlisting}[style=plain]
+nesl_condition_builder [options]
+
+    --help          Displays the help message and exits.
+    --job=<file>    Template .toml configuration file.
+    --bounds=<file> Bounds to test, specified using a .toml configuration file.
+    --max_cpus=<N>  Number of cores to spread the condition building across.
+\end{lstlisting}
+
+Arguments are read \emph{by position}, not by name.
+
+\begin{itemize}
+    \item \textbf{\texttt{--job=<template.toml>}} (first, required) must be a valid NESL job file.
+    \item \textbf{\texttt{--bounds=<ncb.toml>}} (second, required) is the bounds file described under \hyperref[sec:ncb]{NCB bounds file settings}.
+    \item \textbf{\texttt{--max\_cpus=<N>}} (third, optional) defaults to one process.
+\end{itemize}
+
+\section*{NESL job file settings}
+
+\subsection*{Required settings}
+
+The run aborts with a message if any of these is missing.
+
+\begin{longtable}{@{}lL{20mm}L{108mm}@{}}
+    \toprule
+    \textbf{Key} & \textbf{Type} & \textbf{Description} \\
+    \midrule
+    \endfirsthead
+    \toprule
+    \textbf{Key} & \textbf{Type} & \textbf{Description} \\
+    \midrule
+    \endhead
+    \bottomrule
+    \endfoot
+    \endlastfoot
+    \texttt{GAS\_MODEL} & string & Path to the gas-model file. \\
+    \addlinespace
+    \texttt{MASS\_FRAC} & dict & Freestream mass fractions, keyed by species name. \\
+    \addlinespace
+    \texttt{T\_INF} & float & Freestream temperature, K. \\
+    \addlinespace
+    \texttt{U\_INF} & float & Freestream velocity, m/s. \\
+    \addlinespace
+    \texttt{RADIUS} & float & Body nose radius, m. \\
+    \addlinespace
+    \texttt{DOMAIN} & float & Length of the stagnation-line domain, m. \\
+    \addlinespace
+    \texttt{CELLS} & int & Number of cells in the grid. \\
+    \bottomrule
+\end{longtable}
+
+In addition, exactly one of \texttt{P\_INF} or \texttt{RHO\_INF} must be supplied; the run aborts if neither is present.
+
+\begin{center}
+    \begin{tabular}{@{}lllL{88mm}@{}}
+    \toprule
+    \textbf{Key} & \textbf{Type} & \textbf{Default} & \textbf{Description} \\
+    \midrule
+    \texttt{P\_INF} & float & \texttt{None} & Freestream pressure, Pa. \\
+    \addlinespace
+    \texttt{RHO\_INF} & float & \texttt{None} & Freestream density, kg/m$^3$. \\
+    \bottomrule
+    \end{tabular}
+\end{center}
+
+If both are given, \texttt{P\_INF} is used.
+
+\subsubsection*{Species-keyed dictionaries}
+
+\texttt{MASS\_FRAC}, \texttt{WALL\_MASS\_FRAC} and \texttt{RECOM\_RATE} are all dictionaries keyed by species name. Names must match the gas model exactly, and \emph{any species absent from the dictionary is set to zero}.
+
+\begin{lstlisting}
+MASS_FRAC = {N2 = 0.767, O2 = 0.233}
+\end{lstlisting}
+
+\subsection*{Thermochemistry}
+
+\begin{longtable}{@{}lL{22mm}L{22mm}L{72mm}@{}}
+    \toprule
+    \textbf{Key} & \textbf{Type} & \textbf{Default} & \textbf{Description} \\
+    \midrule
+    \endfirsthead
+    \toprule
+    \textbf{Key} & \textbf{Type} & \textbf{Default} & \textbf{Description} \\
+    \midrule
+    \endhead
+    \bottomrule
+    \endfoot
+    \endlastfoot
+    \texttt{CHEM\_MODEL} & string & \textit{absent} & Path to the reaction file. Chemistry is on when this is given and off when it is not. \\
+    \addlinespace
+    \texttt{EXCHANGE\_MODEL} & string & \texttt{""} & Path to the energy-exchange file, for two-temperature runs. \\
+    \addlinespace
+    \texttt{T\_FROZEN} & float & \texttt{1.0} & Cells below this temperature are frozen and no chemistry occurs. \\
+    \bottomrule
+\end{longtable}
+
+\subsection*{Geometry and wall}
+
+\begin{longtable}{@{}lL{32mm}lL{74mm}@{}}
+    \toprule
+    \textbf{Key} & \textbf{Type / values} & \textbf{Default} & \textbf{Description} \\
+    \midrule
+    \endfirsthead
+    \toprule
+    \textbf{Key} & \textbf{Type / values} & \textbf{Default} & \textbf{Description} \\
+    \midrule
+    \endhead
+    \bottomrule
+    \endfoot
+    \endlastfoot
+    \texttt{AXISYMMETRIC} & bool & \texttt{true} & \texttt{true} for a sphere, \texttt{false} for a cylinder. \\
+    \addlinespace
+    \texttt{CURVATURE} & string & \texttt{"empirical"} & Method to determine radius of curvature of the shock. \\
+    \addlinespace
+    \texttt{T\_WALL} & float & \texttt{-1.0} & Isothermal wall temperature, K. Only takes effect with \texttt{VISCOSITY} on; if \texttt{VISCOSITY} is on and \texttt{T\_WALL} is not set, the wall is adiabatic. \\
+    \bottomrule
+\end{longtable}
+
+\subsubsection*{Curvature models}
+
+\begin{itemize}
+    \item \textbf{\texttt{"empirical"}} Uses an empirical correlation to determine, $R_s$.
+    \item \textbf{\texttt{"thin\_shock\_layer"}} Relies on the simple approximation, $R_s=R_b+\Delta$. Can under-predict shock standoff for lower density ratios.
+\end{itemize}
+
+\subsection*{Viscous and wall-catalysis settings}
+
+\begin{longtable}{@{}lL{37mm}L{18mm}L{62mm}@{}}
+    \toprule
+    \textbf{Key} & \textbf{Type / values} & \textbf{Default} & \textbf{Description} \\
+    \midrule
+    \endfirsthead
+    \toprule
+    \textbf{Key} & \textbf{Type / values} & \textbf{Default} & \textbf{Description} \\
+    \midrule
+    \endhead
+    \bottomrule
+    \endfoot
+    \endlastfoot
+    \texttt{VISCOSITY} & bool & \texttt{false} & Turns on viscous effects. \\
+    \addlinespace
+    \texttt{SENSOR} & bool & \texttt{true} & Jameson pressure sensor that damps the viscous fluxes near the shock. Improves stability on startup, but valid for steady runs only. \\
+    \addlinespace
+    \texttt{BETA\_SMOOTHING} & bool & \texttt{true} & Applies smoothing to $\beta$ across the shock to account for a finite shock thickness. \\
+    \addlinespace
+    \texttt{LEWIS\_NUM} & float & \texttt{1.0} & Lewis number used for species diffusion. \\
+    \addlinespace
+    \texttt{CATALYTIC} & string & \texttt{"non\_catalytic"} & Wall catalysis model. \\
+    \addlinespace
+    \texttt{WALL\_MASS\_FRAC} & dict & empty & Wall mass fractions, keyed by species. Used only by \texttt{"fixed\_composition"}. \\
+    \addlinespace
+    \texttt{RECOM\_RATE} & dict & \textit{absent} & Per-species recombination data. Used only by \texttt{"finite\_rate"}. \\
+    \bottomrule
+\end{longtable}
+
+\subsubsection*{Catalysis models}
+
+\begin{itemize}
+    \item \textbf{\texttt{"non\_catalytic"}} Fixes a zero species gradient across the wall.
+    \item \textbf{\texttt{"finite\_rate"}} Each species recombines at the wall at a rate set by its efficiency, defined in \texttt{RECOM\_RATE}.
+    \item \textbf{\texttt{"fixed\_composition"}} The wall composition is held at \texttt{WALL\_MASS\_FRAC}.
+    \item \textbf{\texttt{"equilibrium"}} The wall composition is held at the equilibrium composition for the stagnation pressure and wall temperature.
+\end{itemize}
+
+\subsubsection*{\texttt{RECOM\_RATE} format}
+
+Each catalytic species maps to a dictionary carrying an efficiency and the species the recombined mass is deposited into.
+
+\begin{lstlisting}
+RECOM_RATE = {O = {efficiency = 0.01, product = "O2"}, N = {efficiency = 0.005, product = "N2"}}
+\end{lstlisting}
+
+\begin{itemize}
+    \item \textbf{\texttt{efficiency}} (float) is the recombination efficiency used in calculating the catalytic velocity.
+    \item \textbf{\texttt{product}} is a species name that must exist in the gas model. The mass consumed by the species is added to this species.
+    \item Species omitted from the dictionary get an efficiency of zero, so they do not recombine.
+\end{itemize}
+
+\subsection*{Grid}
+
+\begin{center}
+    \begin{tabular}{@{}lL{30mm}lL{80mm}@{}}
+    \toprule
+    \textbf{Key} & \textbf{Type / values} & \textbf{Default} & \textbf{Description} \\
+    \midrule
+    \texttt{CLUSTERING} & \texttt{false}, int, or float & \texttt{false} & A number greater than 1 is the Roberts clustering parameter, clustering cells towards the wall; values close to 1 cluster hardest. \\
+    \bottomrule
+    \end{tabular}
+\end{center}
+
+There are only two accepted values.
+
+\begin{itemize}
+    \item \textbf{\texttt{false}}, or the key left out altogether, builds a uniform grid; fixed $\Delta x$.
+    \item \textbf{A number greater than 1} clusters cells towards the wall. Values close to 1 cluster hardest.
+\end{itemize}
+
+\subsection*{Time stepping and termination}
+
+\begin{longtable}{@{}lL{36mm}L{22mm}L{68mm}@{}}
+    \toprule
+    \textbf{Key} & \textbf{Type / values} & \textbf{Default} & \textbf{Description} \\
+    \midrule
+    \endfirsthead
+    \toprule
+    \textbf{Key} & \textbf{Type / values} & \textbf{Default} & \textbf{Description} \\
+    \midrule
+    \endhead
+    \bottomrule
+    \endfoot
+    \endlastfoot
+    \texttt{T\_END} & float, or dict \texttt{\{steady = <residual>\}} & \texttt{\{steady = 1e-1\}} & A float runs time-accurately and stops at that simulation time. The dictionary form runs in steady mode, stopping once the largest change in the solution has stayed below that residual for 100 iterations. \\
+    \addlinespace
+    \texttt{MAX\_ITERS} & int & \texttt{1e8} & Maximum number of iterations; the run stops and reports when it is reached. \\
+    \addlinespace
+    \texttt{CFL\_c} & float & \texttt{0.4} & Convective CFL number, $\Delta t_c = \mathrm{CFL}_c \, \Delta x / (|u| + a)$. \\
+    \addlinespace
+    \texttt{CFL\_d} & float & \texttt{0.4} & Diffusive CFL number, $\Delta t_d = \mathrm{CFL}_d \, \Delta x^2 / \max(\nu, \alpha, D_s)$. \\
+    \addlinespace
+    \texttt{LTS} & bool & \texttt{false} & Local time stepping. Each cell advances on its own stable time step, which accelerates convergence but destroys time accuracy. \\
+    \addlinespace
+    \texttt{HOT\_START} & bool & \texttt{true} & Starts the run from an estimate of the post-shock state instead of a uniform freestream, which converges faster. \\
+    \bottomrule
+\end{longtable}
+
+\texttt{LTS} has two requirements, and the run stops if either is broken.
+
+\begin{itemize}
+    \item It needs steady mode, so \texttt{T\_END} must be given in its dictionary form; and
+    \item it cannot be combined with transient output, that is, the dictionary form of \texttt{SAVE}.
+\end{itemize}
+
+\subsection*{Output}
+
+\begin{longtable}{@{}lL{44mm}L{16mm}L{68mm}@{}}
+    \toprule
+    \textbf{Key} & \textbf{Type / values} & \textbf{Default} & \textbf{Description} \\
+    \midrule
+    \endfirsthead
+    \toprule
+    \textbf{Key} & \textbf{Type / values} & \textbf{Default} & \textbf{Description} \\
+    \midrule
+    \endhead
+    \bottomrule
+    \endfoot
+    \endlastfoot
+    \texttt{SAVE} & \texttt{false}, a string, or a dict \texttt{\{path = <string>, interval = <float>\}} & \texttt{false} & Output control, described below. \\
+    \addlinespace
+    \texttt{PLOT} & bool & \texttt{false} & Writes PNG plots after the run. Has no effect unless \texttt{SAVE} is set. \\
+    \addlinespace
+    \texttt{VERBOSE} & bool & \texttt{true} & Prints progress, the iteration and residual trace every 1000 iterations, and the final heat flux and standoff. \\
+    \bottomrule
+\end{longtable}
+
+\texttt{SAVE} behaves in three ways.
+
+\begin{itemize}
+    \item \textbf{\texttt{false}}, nothing is written.
+    \item \textbf{A string}, the profile is written to that path as a CSV, and the stagnation-point summary.
+    \item \textbf{A dictionary}, as above, plus a transient trace of the same stagnation-point quantities, written to \texttt{transient\_<path>} at the given \texttt{interval} of simulation time. In this mode the \texttt{stagpoint\_} file is \emph{not} written, which matters when the run is driven by NCB (see \hyperref[sec:ncb-output]{Output layout}).
+\end{itemize}
+
+The profile CSV columns are $x$, $u$, $\rho$, $T_{tr}$, $p$, $e_{tr}$, $e_{ve}$, $\mu$, $k_{tr}$, $a$, $\beta$, $T_{ve}$, $k_{ve}$, followed by one column per species. On a one-temperature gas model the three vibro-electronic columns are omitted and the header reads $e$, $T$ and $k$.
+
+With \texttt{PLOT} enabled, the plots written are \texttt{<name>\_prim.png} for the primitives, \texttt{<name>\_massf.png} if chemistry is on, and \texttt{<name>\_transient.png} if the transient mode is in use, where \texttt{<name>} is \texttt{SAVE} with its extension stripped.
+
+\subsection*{A complete NESL job file}
+
+\begin{lstlisting}
+# Freestream.
+T_INF = 300.0
+P_INF = 100.0
+U_INF = 5000.0
+MASS_FRAC = {N2 = 0.767, O2 = 0.233}
+
+# Geometry.
+RADIUS = 0.05
+DOMAIN = 0.005
+AXISYMMETRIC = true
+
+# Models.
+GAS_MODEL = "air-5sp.gas"
+CHEM_MODEL = "air-5sp.chem"
+EXCHANGE_MODEL = "air-5sp.kin"
+
+# Grid.
+CELLS = 100
+CLUSTERING = 1.05
+
+# Wall.
+T_WALL = 300.0
+VISCOSITY = true
+CATALYTIC = "equilibrium"
+LEWIS_NUM = 1.2
+
+# Time stepping.
+T_END = {steady = 1e-2}
+MAX_ITERS = 1e7
+CFL_c = 0.4
+CFL_d = 0.1
+LTS = true
+
+# Output.
+SAVE = "result.csv"
+PLOT = true
+VERBOSE = true
+\end{lstlisting}
+
+Invoked as,
+\begin{lstlisting}[style=plain]
+nesl --job=template.toml
+\end{lstlisting}
+
+\section*{NCB bounds file settings}
+\label{sec:ncb}
+
+The bounds file defines the sweep. NCB takes the Cartesian product, or the element-wise zip, of the freestream arrays, generates one NESL job per combination, runs them in parallel, and collects the results.
+
+\textbf{NCB is not configured to work with transient runs.} It only handles the steady stagnation-point output, so the template must use the plain string form of \texttt{SAVE}. See \hyperref[sec:ncb-output]{Output layout}.
+
+\subsection*{Keys}
+
+\begin{longtable}{@{}lL{20mm}L{18mm}L{16mm}L{62mm}@{}}
+    \toprule
+    \textbf{Key} & \textbf{Type} & \textbf{Required} & \textbf{Default} & \textbf{Description} \\
+    \midrule
+    \endfirsthead
+    \toprule
+    \textbf{Key} & \textbf{Type} & \textbf{Required} & \textbf{Default} & \textbf{Description} \\
+    \midrule
+    \endhead
+    \bottomrule
+    \endfoot
+    \endlastfoot
+    \texttt{T\_BOUND} & dict, string, or number & Yes & - & Freestream temperature values, K. \\
+    \addlinespace
+    \texttt{U\_BOUND} & dict, string, or number & Yes & - & Freestream velocity values, m/s. \\
+    \addlinespace
+    \texttt{P\_BOUND} & dict, string, or number & One of the two & - & Freestream pressure values, Pa. \\
+    \addlinespace
+    \texttt{RHO\_BOUND} & dict, string, or number & One of the two & - & Freestream density values, kg/m$^3$. \\
+    \addlinespace
+    \texttt{PERMUTATIONS} & bool & No & \texttt{true} & \texttt{true} sweeps the full Cartesian product of the three arrays. \texttt{false} zips them element-wise, so entry $i$ of each array forms case $i$. \\
+    \addlinespace
+    \texttt{DOMAIN\_SCALE} & float & No & \texttt{1.5} & Safety factor on the estimated shock standoff used to set each case's \texttt{DOMAIN}. Ignored when \texttt{FIXED\_DOMAIN} is set. \\
+    \addlinespace
+    \texttt{FIXED\_DOMAIN} & bool & No & \texttt{false} & \texttt{true} holds the domain fixed across the sweep: NCB estimates no standoff and leaves the template's \texttt{DOMAIN} untouched. \\
+    \bottomrule
+\end{longtable}
+
+One of \texttt{P\_BOUND} or \texttt{RHO\_BOUND} must be given. If \texttt{P\_BOUND} is present it is used and the jobs are written with \texttt{P\_INF}; otherwise \texttt{RHO\_BOUND} is used and the jobs are written with \texttt{RHO\_INF}.
+
+Under \texttt{PERMUTATIONS = false} the arrays should be the same length; any extra entries are ignored.
+
+\subsection*{Bound specification}
+
+Each of \texttt{T\_BOUND}, \texttt{U\_BOUND}, \texttt{P\_BOUND} and \texttt{RHO\_BOUND} accepts three forms.
+
+\paragraph{A single number,} a scalar that is held fixed across the sweep.
+
+\begin{lstlisting}
+T_BOUND = 300.0
+\end{lstlisting}
+
+\paragraph{A range dictionary,} takes \texttt{lower}, \texttt{upper}, \texttt{cells} and \texttt{bound\_type}.
+
+\begin{lstlisting}
+U_BOUND = {lower = 4000.0, upper = 5000.0, cells = 5, bound_type = 'linear'}
+\end{lstlisting}
+
+\begin{center}
+    \begin{tabular}{@{}lL{122mm}@{}}
+    \toprule
+    \textbf{\texttt{bound\_type}} & \textbf{Spacing} \\
+    \midrule
+    \texttt{'linear'} & \texttt{cells} points evenly spaced from \texttt{lower} to \texttt{upper}. \\
+    \addlinespace
+    \texttt{'log\_lower'} & \texttt{cells} points logarithmically spaced, ascending from \texttt{lower} to \texttt{upper}, so points bunch near \texttt{lower}. \\
+    \addlinespace
+    \texttt{'log\_upper'} & \texttt{cells} points logarithmically spaced, descending from \texttt{upper} to \texttt{lower}, so points bunch near \texttt{upper}. \\
+    \bottomrule
+    \end{tabular}
+\end{center}
+
+\paragraph{A path string,} a text file of values, one per line, loaded directly.
+
+\begin{lstlisting}
+T_BOUND = "temperatures.txt"
+\end{lstlisting}
+
+\subsection*{What NCB writes into each job}
+
+For each case NCB copies the template and overrides:
+
+\begin{itemize}
+    \item \textbf{\texttt{T\_INF}}, \texttt{U\_INF}, and either \texttt{P\_INF} or \texttt{RHO\_INF} from the sweep;
+    \item \textbf{\texttt{DOMAIN}}, computed per case as \texttt{DOMAIN\_SCALE} times the inviscid frozen normal-shock standoff estimate for that condition. Under \texttt{FIXED\_DOMAIN = true} this key is not written at all and the template's own \texttt{DOMAIN} carries through to every case; and
+    \item \textbf{\texttt{GAS\_MODEL}}, plus \texttt{CHEM\_MODEL} and \texttt{EXCHANGE\_MODEL} where present, each rewritten to \texttt{..\allowbreak/..\allowbreak/<file name>}.
+\end{itemize}
+
+That last rewrite means the model files must sit in the directory NCB is launched from, since each case runs two levels down in \texttt{runs/caseNNN/}.
+
+Everything else in the template, grid, wall, catalysis, time stepping, output, is passed through unchanged.
+
+\subsection*{Output layout}
+\label{sec:ncb-output}
+
+\begin{lstlisting}[style=plain]
+runs/
+    case00/
+        job.toml
+        ... nesl output ...
+    case01/
+    results.csv
+\end{lstlisting}
+
+NCB refuses to start if \texttt{runs/} already exists.
+
+\texttt{results.csv} collects one row per case: case number, \texttt{T\_inf}, \texttt{p\_inf} or \texttt{rho\_inf}, \texttt{u\_inf}, standoff, convective heat flux, diffusive heat flux, stagnation pressure and shock radius of curvature.
+
+The template's \texttt{SAVE} must be a plain string. With \texttt{false}, or with the dictionary form that enables the transient trace, every row of \texttt{results.csv} comes out as \texttt{NaN}.
+
+\subsection*{A complete NCB bounds file}
+
+\begin{lstlisting}
+T_BOUND = {lower = 200.0, upper = 300.0, cells = 3, bound_type = 'linear'}
+
+RHO_BOUND = {lower = 1e-4, upper = 1e-2, cells = 4, bound_type = 'log_lower'}
+
+U_BOUND = {lower = 4000.0, upper = 8000.0, cells = 5, bound_type = 'log_upper'}
+
+PERMUTATIONS = true
+
+DOMAIN_SCALE = 1.5
+\end{lstlisting}
+
+Invoked as,
+
+\begin{lstlisting}[style=plain]
+nesl_condition_builder --job=template.toml --bounds=bounds.toml --max_cpus=8
+\end{lstlisting}
+
+\section*{Improving stability}
+
+Settings worth adjusting first when a run will not converge.
+
+\begin{itemize}
+    \item Lower \texttt{CFL\_c} and \texttt{CFL\_d}, e.g. to 0.1-0.2.
+    \item Keep \texttt{SENSOR} and \texttt{HOT\_START} on.
+    \item Cluster the grid towards the wall with \texttt{CLUSTERING}, close to 1, e.g. 1.01-1.05.
+    \item Increase \texttt{CELLS} to better resolve the shock and boundary layer.
+    \item Check \texttt{DOMAIN} is long enough to contain the shock.
+\end{itemize}
+
+\end{document}

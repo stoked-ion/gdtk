@@ -1,0 +1,16 @@
+contourpy
+cycler
+Cython
+fonttools
+kiwisolver
+matplotlib
+numpy
+packaging
+pillow
+pyparsing
+python-dateutil
+six
+tomli
+tomli-w
+setuptools
+scipy

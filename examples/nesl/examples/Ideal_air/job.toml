@@ -1,0 +1,26 @@
+# Freestream.
+T_INF = 53.0
+P_INF = 230.0
+U_INF = 1670.0
+MASS_FRAC = {air = 1}
+
+# Geometry.
+RADIUS = 0.0127
+DOMAIN = 0.0018
+
+# Models.
+GAS_MODEL = "air-ideal.gas"
+
+# Grid.
+CELLS = 300
+
+# Wall.
+T_WALL = 300.0
+VISCOSITY = true
+
+# Time stepping.
+HOT_START = false
+
+# Output.
+SAVE = {path = "air.dat", interval = 1e-8}
+PLOT = true

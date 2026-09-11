@@ -598,7 +598,7 @@ public:
         // Park heuristic pressure limiter
         number phi_hp = 1.0;
         if (apply_heuristic_pressure_limiter) {
-            park_limit(cell_cloud, ws, myConfig);
+            park_limit(cell_cloud, ws, myConfig, gtl);
             phi_hp = velxPhi; // we choose velxPhi here since it will always be set regardless of the thermo_interpolator
         }
 
@@ -756,7 +756,7 @@ public:
         // Park heuristic pressure limiter
         number phi_hp = 1.0;
         if (apply_heuristic_pressure_limiter) {
-            park_limit(cell_cloud, ws, myConfig);
+            park_limit(cell_cloud, ws, myConfig, gtl);
             phi_hp = velxPhi; // we choose velxPhi here since it will always be set regardless of the thermo_interpolator
         }
 
@@ -911,7 +911,7 @@ public:
         // Park heuristic pressure limiter
         number phi_hp = 1.0;
         if (apply_heuristic_pressure_limiter) {
-            park_limit(cell_cloud, ws, myConfig);
+            park_limit(cell_cloud, ws, myConfig, gtl);
             phi_hp = velxPhi; // we choose velxPhi here since it will always be set regardless of the thermo_interpolator
         }
 
@@ -1030,6 +1030,144 @@ public:
     } // end venkat_limit()
 
     @nogc
+    void venkat2_limit(FluidFVCell[] cell_cloud, ref LSQInterpWorkspace ws,
+                       bool apply_heuristic_pressure_limiter, ref LocalConfig myConfig, size_t gtl=0)
+    {
+        // Applies the classic Venkatakrishnan limiter, see references at the top of venkat_limit(),
+        // but uses the Park limit sensor as a per-variable blending mask. The Park sensor smoothly
+        // relaxes the Venkat limiter toward unity in smooth regions, reducing the spurious noise
+        // that the classical Venkat limiter can produce in otherwise uniform flow fields.
+        //
+        number delp, delm, delu, U, theta, phi, h, phi_f, qref;
+        immutable double K = myConfig.smooth_limiter_coeff;
+        if (myConfig.dimensions == 3) {
+            h = pow(cell_cloud[0].volume[gtl], 1.0/3.0);
+        } else {
+            h = sqrt(cell_cloud[0].volume[gtl]);
+        }
+        number eps2;
+
+        // Park heuristic limiter
+        park2_limit(cell_cloud, ws, myConfig, gtl);
+        number phi_hp = 1.0;
+        if (apply_heuristic_pressure_limiter) {
+            phi_hp = pPhi;
+        }
+
+        string codeForLimits(string qname, string gname, string limFactorname,
+                             string qMaxname, string qMinname)
+        {
+            string code = "{ number parkMask = "~limFactorname~"; ";
+            if ( qname == "vel.x" || qname == "vel.y" || qname == "vel.z" ) {
+                code ~= "number velMax = sqrt(velxMax*velxMax+velyMax*velyMax+velzMax*velzMax);
+                         number velMin = sqrt(velxMin*velxMin+velyMin*velyMin+velzMin*velzMin);
+                         qref = fmax(velMax, velMin);";
+            } else {
+                code ~= "qref = fmax(fabs("~qMaxname~"),fabs("~qMinname~"));";
+            }
+            code ~= "
+            U = cell_cloud[0].fs."~qname~";
+            eps2 = pow(K*h/lref, 3) * pow(qref, 2) + 1.0e-25;
+            phi = 1.0;
+            foreach (i, f; cell_cloud[0].iface) {
+                number dx = f.pos.x - cell_cloud[0].pos[gtl].x;
+                number dy = f.pos.y - cell_cloud[0].pos[gtl].y;
+                number dz = f.pos.z - cell_cloud[0].pos[gtl].z;
+                delm = "~gname~".x * dx + "~gname~".y * dy;
+                if (myConfig.dimensions == 3) { delm += "~gname~".z * dz; }
+                delp = (delm >= 0.0) ? "~qMaxname~" - U: "~qMinname~" - U;
+                if (delm == 0.0) {
+                    phi_f = 1.0;
+                } else {
+                    phi_f = (delp*delp + 2.0*delp*delm + eps2)/(delp*delp + 2.0*delm*delm + delp*delm + eps2);
+                }
+                phi = fmin(phi, phi_f);
+            }
+            "~limFactorname~" = (phi + parkMask * (1.0 - phi))*phi_hp;
+            }
+            ";
+            return code;
+        }
+        // x-velocity
+        mixin(codeForLimits("vel.x", "velx", "velxPhi", "velxMax", "velxMin"));
+        mixin(codeForLimits("vel.y", "vely", "velyPhi", "velyMax", "velyMin"));
+        mixin(codeForLimits("vel.z", "velz", "velzPhi", "velzMax", "velzMin"));
+        version(MHD) {
+            if (myConfig.MHD) {
+                mixin(codeForLimits("B.x", "Bx", "BxPhi", "BxMax", "BxMin"));
+                mixin(codeForLimits("B.y", "By", "ByPhi", "ByMax", "ByMin"));
+                mixin(codeForLimits("B.z", "Bz", "BzPhi", "BzMax", "BzMin"));
+                if (myConfig.divergence_cleaning) {
+                    mixin(codeForLimits("psi", "psi", "psiPhi", "psiMax", "psiMin"));
+                }
+            }
+        }
+        version(turbulence) {
+            foreach (it; 0 .. myConfig.turb_model.nturb) {
+                mixin(codeForLimits("turb[it]","turb[it]","turbPhi[it]","turbMax[it]","turbMin[it]"));
+            }
+        }
+        version(multi_species_gas) {
+            auto nsp = myConfig.n_species;
+            if (nsp > 1) {
+                // Multiple species.
+                foreach (isp; 0 .. nsp) {
+                    mixin(codeForLimits("gas.rho_s[isp]", "rho_s[isp]", "rho_sPhi[isp]",
+                                        "rho_sMax[isp]", "rho_sMin[isp]"));
+                }
+            } else {
+                // Only one possible gradient value for a single species.
+                rho_s[0].x = 0.0; rho_s[0].y = 0.0; rho_s[0].z = 0.0;
+            }
+        }
+        // Interpolate on two of the thermodynamic quantities,
+        // and fill in the rest based on an EOS call.
+        auto nmodes = myConfig.n_modes;
+        final switch (myConfig.thermo_interpolator) {
+        case InterpolateOption.pt:
+            mixin(codeForLimits("gas.p", "p", "pPhi", "pMax", "pMin"));
+            mixin(codeForLimits("gas.T", "T", "TPhi", "TMax", "TMin"));
+            version(multi_T_gas) {
+                foreach (imode; 0 .. nmodes) {
+                    mixin(codeForLimits("gas.T_modes[imode]", "T_modes[imode]", "T_modesPhi[imode]",
+                                        "T_modesMax[imode]", "T_modesMin[imode]"));
+                }
+            }
+            break;
+        case InterpolateOption.rhou:
+            mixin(codeForLimits("gas.rho", "rho", "rhoPhi", "rhoMax", "rhoMin"));
+            mixin(codeForLimits("gas.u", "u", "uPhi", "uMax", "uMin"));
+            version(multi_T_gas) {
+                foreach (imode; 0 .. nmodes) {
+                    mixin(codeForLimits("gas.u_modes[imode]", "u_modes[imode]", "u_modesPhi[imode]",
+                                        "u_modesMax[imode]", "u_modesMin[imode]"));
+                }
+            }
+            break;
+        case InterpolateOption.rhop:
+            mixin(codeForLimits("gas.rho", "rho", "rhoPhi", "rhoMax", "rhoMin"));
+            mixin(codeForLimits("gas.p", "p", "pPhi", "pMax", "pMin"));
+            version(multi_T_gas) {
+                foreach (imode; 0 .. nmodes) {
+                    mixin(codeForLimits("gas.u_modes[imode]", "u_modes[imode]", "u_modesPhi[imode]",
+                                        "u_modesMax[imode]", "u_modesMin[imode]"));
+                }
+            }
+            break;
+        case InterpolateOption.rhot:
+            mixin(codeForLimits("gas.rho", "rho", "rhoPhi", "rhoMax", "rhoMin"));
+            mixin(codeForLimits("gas.T", "T", "TPhi", "TMax", "TMin"));
+            version(multi_T_gas) {
+                foreach (imode; 0 .. nmodes) {
+                    mixin(codeForLimits("gas.T_modes[imode]", "T_modes[imode]", "T_modesPhi[imode]",
+                                        "T_modesMax[imode]", "T_modesMin[imode]"));
+                }
+            }
+            break;
+        } // end switch thermo_interpolator
+    } // end venkat2_limit()
+
+    @nogc
     void nishikawa_limit(FluidFVCell[] cell_cloud, ref LSQInterpWorkspace ws,
                          bool apply_heuristic_pressure_limiter, ref LocalConfig myConfig, size_t gtl=0)
     {
@@ -1055,7 +1193,7 @@ public:
         // Park heuristic pressure limiter
         number phi_hp = 1.0;
         if (apply_heuristic_pressure_limiter) {
-            park_limit(cell_cloud, ws, myConfig);
+            park_limit(cell_cloud, ws, myConfig, gtl);
             phi_hp = velxPhi; // we choose velxPhi here since it will always be set regardless of the thermo_interpolator
         }
 
@@ -1178,24 +1316,34 @@ public:
         } // end switch thermo_interpolator
     } // end nishikawa_limit()
 
-    @nogc
-    void park_limit(FluidFVCell[] cell_cloud, ref LSQInterpWorkspace ws,
-                    ref LocalConfig myConfig, size_t gtl=0)
+    static string codeForParkSensor(string qname, string gname, string limFactorname,
+                                    bool useVelocityMagnitude=false,
+                                    bool useAverageMagnitude=false)
     {
-        // Pressure-based heuristic limiter
-        // Implementation details from
-        //     M. A. Park
-        //     Anisotropic Output-Based Adaptation with Tetrahedral Cut Cells for Compressible Flows
-        //     Thesis @ Massachusetts Institute of Technology, 2008
+        // Limiter sensor originally developed as a heuristic pressure-based limiter in ref. [1].
+        //
+        // For variables that can legitimately change sign, we depart from Park's original pressure-based scaling by using
+        // the average magnitude across the face rather than the minimum magnitude. Near a zero crossing, the scale
+        // can collapse towards zero even when both states are physically reasonable, making the normalised
+        // variation artificially large and causing excessive limiting.
+        //
+        // Velocity is handled separately because its components can also change sign, however the speed cannot.
+        // We choose to use the larger of the flow speed and sound speed so the scale does not become too small in
+        // slow or stagnant regions.
+        //
         // Modified by NNG to use the harmonic mean of the s value computed at each face,
         // instead of just the minimum s value. This smooths out the limiter spatially and
         // removes a source of noise in the reconstruction process, while still prioritising
         // small values of s in the averaging process. (09/08/22)
-
-        FluidFVCell ncell;
-        number pmin;
-        number phi = 0.0;
-        number n = 0.0;
+        //
+        // references:
+        // [1] M. A. Park
+        //     Anisotropic Output-Based Adaptation with Tetrahedral Cut Cells for Compressible Flows
+        //     Thesis @ Massachusetts Institute of Technology, 2008
+        //
+        string code = "{
+        phi = 0.0;
+        n = 0.0;
         foreach (f; cell_cloud[0].iface) {
             number dx1 = f.pos.x - f.left_cell.pos[gtl].x;
             number dy1 = f.pos.y - f.left_cell.pos[gtl].y;
@@ -1203,35 +1351,76 @@ public:
             number dx2 = f.pos.x - f.right_cell.pos[gtl].x;
             number dy2 = f.pos.y - f.right_cell.pos[gtl].y;
             number dz2 = f.pos.z - f.right_cell.pos[gtl].z;
-            number dpx = dx1*f.left_cell.gradients.p.x - dx2*f.right_cell.gradients.p.x;
-            number dpy = dy1*f.left_cell.gradients.p.y - dy2*f.right_cell.gradients.p.y;
-            number dpz = dz1*f.left_cell.gradients.p.z - dz2*f.right_cell.gradients.p.z;
-            number dp = dpx*dpx + dpy*dpy;
-            if (myConfig.dimensions == 3) { dp += dpz*dpz; }
-            dp = sqrt(dp);
-            pmin = fmin(f.left_cell.fs.gas.p, f.right_cell.fs.gas.p);
-            number s = 1.0-tanh(dp/pmin);
+            number dqx = dx1*f.left_cell.gradients."~gname~".x - dx2*f.right_cell.gradients."~gname~".x;
+            number dqy = dy1*f.left_cell.gradients."~gname~".y - dy2*f.right_cell.gradients."~gname~".y;
+            number dqz = dz1*f.left_cell.gradients."~gname~".z - dz2*f.right_cell.gradients."~gname~".z;
+            number dq = dqx*dqx + dqy*dqy;
+            if (myConfig.dimensions == 3) { dq += dqz*dqz; }
+            dq = sqrt(dq);
+        ";
+        if (useVelocityMagnitude) {
+            code ~= "
+            number qScaleLeft = f.left_cell.fs.vel.x*f.left_cell.fs.vel.x +
+                                f.left_cell.fs.vel.y*f.left_cell.fs.vel.y;
+            number qScaleRight = f.right_cell.fs.vel.x*f.right_cell.fs.vel.x +
+                                 f.right_cell.fs.vel.y*f.right_cell.fs.vel.y;
+            if (myConfig.dimensions == 3) {
+                qScaleLeft += f.left_cell.fs.vel.z*f.left_cell.fs.vel.z;
+                qScaleRight += f.right_cell.fs.vel.z*f.right_cell.fs.vel.z;
+            }
+            number flowScale = 0.5*(sqrt(qScaleLeft) + sqrt(qScaleRight));
+            number aLeft = fabs(f.left_cell.fs.gas.a);
+            number aRight = fabs(f.right_cell.fs.gas.a);
+            number acousticScale = sqrt(0.5*(aLeft*aLeft + aRight*aRight));
+            number qScale = fmax(flowScale, acousticScale);
+        ";
+        } else if (useAverageMagnitude) {
+            code ~= "
+            number qScale = 0.5*(fabs(f.left_cell.fs."~qname~") +
+                                 fabs(f.right_cell.fs."~qname~"));
+        ";
+        } else {
+            code ~= "
+            number qScale = fmin(fabs(f.left_cell.fs."~qname~"),
+                                 fabs(f.right_cell.fs."~qname~"));
+        ";
+        }
+        code ~= "
+            number s = 1.0-tanh(dq/fmax(qScale, 1e-12));
+            s = fmax(0.0, fmin(1.0, s));
             phi += 1.0/fmax(s, 1e-16);
             n += 1.0;
         }
-        phi = n/phi;
+        "~limFactorname~" = n/phi;
+        } ";
+        return code;
+    } // end codeForParkSensor()
+
+    @nogc
+    void park_limit(FluidFVCell[] cell_cloud, ref LSQInterpWorkspace ws,
+                    ref LocalConfig myConfig, size_t gtl=0)
+    {
+        // Original Pressure-based heuristic limiter from Park's thesis
+        number phi, n, limFactor;
+
+        mixin(codeForParkSensor("gas.p", "p", "limFactor"));
 
         // the limiter value for each variable is set to the pressure-based value
-        velxPhi = phi; velyPhi = phi; velzPhi = phi;
+        velxPhi = limFactor; velyPhi = limFactor; velzPhi = limFactor;
         version(MHD) {
             if (myConfig.MHD) {
-                BxPhi = phi; ByPhi = phi; BzPhi = phi;
-                if (myConfig.divergence_cleaning) { psiPhi = phi; }
+                BxPhi = limFactor; ByPhi = limFactor; BzPhi = limFactor;
+                if (myConfig.divergence_cleaning) { psiPhi = limFactor; }
             }
         }
         version(turbulence) {
-            foreach (it; 0 .. myConfig.turb_model.nturb) { turbPhi[it] = phi; }
+            foreach (it; 0 .. myConfig.turb_model.nturb) { turbPhi[it] = limFactor; }
         }
         version(multi_species_gas) {
             auto nsp = myConfig.n_species;
             if (nsp > 1) {
                 // Multiple species.
-                foreach (isp; 0 .. nsp) { rho_sPhi[isp] = phi; }
+                foreach (isp; 0 .. nsp) { rho_sPhi[isp] = limFactor; }
             } else {
                 // Only one possible gradient value for a single species.
                 rho_s[0].x = 0.0; rho_s[0].y = 0.0; rho_s[0].z = 0.0;
@@ -1243,27 +1432,27 @@ public:
         auto nmodes = myConfig.n_modes;
         final switch (myConfig.thermo_interpolator) {
         case InterpolateOption.pt:
-            pPhi = phi; TPhi = phi;
+            pPhi = limFactor; TPhi = limFactor;
             version(multi_T_gas) {
-                foreach (imode; 0 .. nmodes) { T_modesPhi[imode] = phi; }
+                foreach (imode; 0 .. nmodes) { T_modesPhi[imode] = limFactor; }
             }
             break;
         case InterpolateOption.rhou:
-            rhoPhi = phi; uPhi = phi;
+            rhoPhi = limFactor; uPhi = limFactor;
             version(multi_T_gas) {
-                foreach (imode; 0 .. nmodes) { u_modesPhi[imode] = phi; }
+                foreach (imode; 0 .. nmodes) { u_modesPhi[imode] = limFactor; }
             }
             break;
         case InterpolateOption.rhop:
-            rhoPhi = phi; pPhi = phi;
+            rhoPhi = limFactor; pPhi = limFactor;
             version(multi_T_gas) {
-                foreach (imode; 0 .. nmodes) { u_modesPhi[imode] = phi; }
+                foreach (imode; 0 .. nmodes) { u_modesPhi[imode] = limFactor; }
             }
             break;
         case InterpolateOption.rhot:
-            rhoPhi = phi; TPhi = phi;
+            rhoPhi = limFactor; TPhi = limFactor;
             version(multi_T_gas) {
-                foreach (imode; 0 .. nmodes) { T_modesPhi[imode] = phi;
+                foreach (imode; 0 .. nmodes) { T_modesPhi[imode] = limFactor;
                 }
             }
             break;
@@ -1271,6 +1460,91 @@ public:
 
         return;
     } // end park_limit()
+
+    @nogc
+    void park2_limit(FluidFVCell[] cell_cloud, ref LSQInterpWorkspace ws,
+                     ref LocalConfig myConfig, size_t gtl=0)
+    {
+        // This limit routine applies the Park limit sensor to all reconstructed variables
+        number phi, n;
+
+        // Apply the base Park sensor independently to each velocity component.
+        // Each component uses a shared velocity-magnitude scale with an
+        // acoustic floor from the stored gas-model sound speed.
+        mixin(codeForParkSensor("vel.x", "velx", "velxPhi", true));
+        mixin(codeForParkSensor("vel.y", "vely", "velyPhi", true));
+        mixin(codeForParkSensor("vel.z", "velz", "velzPhi", true));
+        version(MHD) {
+            if (myConfig.MHD) {
+                mixin(codeForParkSensor("B.x", "Bx", "BxPhi", false, true));
+                mixin(codeForParkSensor("B.y", "By", "ByPhi", false, true));
+                mixin(codeForParkSensor("B.z", "Bz", "BzPhi", false, true));
+                if (myConfig.divergence_cleaning) {
+                    mixin(codeForParkSensor("psi", "psi", "psiPhi", false, true));
+                }
+            }
+        }
+        version(turbulence) {
+            foreach (it; 0 .. myConfig.turb_model.nturb) {
+                mixin(codeForParkSensor("turb[it]","turb[it]","turbPhi[it]", false, true));
+            }
+        }
+        version(multi_species_gas) {
+            auto nsp = myConfig.n_species;
+            if (nsp > 1) {
+                // Multiple species.
+                foreach (isp; 0 .. nsp) {
+                    mixin(codeForParkSensor("gas.rho_s[isp]", "rho_s[isp]", "rho_sPhi[isp]", false, true));
+                }
+            } else {
+                // Only one possible gradient value for a single species.
+                rho_s[0].x = 0.0; rho_s[0].y = 0.0; rho_s[0].z = 0.0;
+            }
+        }
+        // Interpolate on two of the thermodynamic quantities,
+        // and fill in the rest based on an EOS call.
+        auto nmodes = myConfig.n_modes;
+        final switch (myConfig.thermo_interpolator) {
+        case InterpolateOption.pt:
+            mixin(codeForParkSensor("gas.p", "p", "pPhi"));
+            mixin(codeForParkSensor("gas.T", "T", "TPhi"));
+            version(multi_T_gas) {
+                foreach (imode; 0 .. nmodes) {
+                    mixin(codeForParkSensor("gas.T_modes[imode]", "T_modes[imode]", "T_modesPhi[imode]"));
+                }
+            }
+            break;
+        case InterpolateOption.rhou:
+            mixin(codeForParkSensor("gas.p", "p", "pPhi")); // might need this for the heuristic pressure limiter
+            mixin(codeForParkSensor("gas.rho", "rho", "rhoPhi"));
+            mixin(codeForParkSensor("gas.u", "u", "uPhi", false, true));
+            version(multi_T_gas) {
+                foreach (imode; 0 .. nmodes) {
+                    mixin(codeForParkSensor("gas.u_modes[imode]", "u_modes[imode]", "u_modesPhi[imode]", false, true));
+                }
+            }
+            break;
+        case InterpolateOption.rhop:
+            mixin(codeForParkSensor("gas.rho", "rho", "rhoPhi"));
+            mixin(codeForParkSensor("gas.p", "p", "pPhi"));
+            version(multi_T_gas) {
+                foreach (imode; 0 .. nmodes) {
+                    mixin(codeForParkSensor("gas.u_modes[imode]", "u_modes[imode]", "u_modesPhi[imode]", false, true));
+                }
+            }
+            break;
+        case InterpolateOption.rhot:
+            mixin(codeForParkSensor("gas.p", "p", "pPhi")); // might need this for the heuristic pressure limiter
+            mixin(codeForParkSensor("gas.rho", "rho", "rhoPhi"));
+            mixin(codeForParkSensor("gas.T", "T", "TPhi"));
+            version(multi_T_gas) {
+                foreach (imode; 0 .. nmodes) {
+                    mixin(codeForParkSensor("gas.T_modes[imode]", "T_modes[imode]", "T_modesPhi[imode]"));
+                }
+            }
+            break;
+        } // end switch thermo_interpolator
+    } // end park2_limit()
 
     @nogc
     void store_max_min_values_for_compact_stencil(FluidFVCell[] cell_cloud, ref LocalConfig myConfig)
@@ -1549,8 +1823,10 @@ public:
             // the Park limiter needs the pressure gradient
             if (myConfig.apply_unstructured_limiter_min_pressure_filter ||
                 myConfig.unstructured_limiter == UnstructuredLimiter.park ||
+                myConfig.unstructured_limiter == UnstructuredLimiter.park2 ||
                 myConfig.unstructured_limiter == UnstructuredLimiter.hvan_albada ||
                 myConfig.unstructured_limiter == UnstructuredLimiter.hvenkat ||
+                myConfig.unstructured_limiter == UnstructuredLimiter.hvenkat2 ||
                 myConfig.unstructured_limiter == UnstructuredLimiter.hvenkat_mlp ||
                 myConfig.unstructured_limiter == UnstructuredLimiter.hnishikawa) {
                 mixin(codeForGradients("gas.p", "p", "pMax", "pMin"));
@@ -1578,8 +1854,10 @@ public:
             // the Park limiter needs the pressure gradient
             if (myConfig.apply_unstructured_limiter_min_pressure_filter ||
                 myConfig.unstructured_limiter == UnstructuredLimiter.park ||
+                myConfig.unstructured_limiter == UnstructuredLimiter.park2 ||
                 myConfig.unstructured_limiter == UnstructuredLimiter.hvan_albada ||
                 myConfig.unstructured_limiter == UnstructuredLimiter.hvenkat ||
+                myConfig.unstructured_limiter == UnstructuredLimiter.hvenkat2 ||
                 myConfig.unstructured_limiter == UnstructuredLimiter.hvenkat_mlp ||
                 myConfig.unstructured_limiter == UnstructuredLimiter.hnishikawa) {
                 mixin(codeForGradients("gas.p", "p", "pMax", "pMin"));
@@ -1973,6 +2251,8 @@ public:
                         goto case UnstructuredLimiter.venkat;
                     case UnstructuredLimiter.park:
                         goto case UnstructuredLimiter.venkat;
+                    case UnstructuredLimiter.park2:
+                        goto case UnstructuredLimiter.venkat;
                     case UnstructuredLimiter.hvan_albada:
                         goto case UnstructuredLimiter.venkat;
                     case UnstructuredLimiter.van_albada:
@@ -1986,6 +2266,10 @@ public:
                     case UnstructuredLimiter.venkat_mlp:
                         goto case UnstructuredLimiter.venkat;
                     case UnstructuredLimiter.hvenkat:
+                        goto case UnstructuredLimiter.venkat;
+                    case UnstructuredLimiter.venkat2:
+                        goto case UnstructuredLimiter.venkat;
+                    case UnstructuredLimiter.hvenkat2:
                         goto case UnstructuredLimiter.venkat;
                     case UnstructuredLimiter.venkat:
                         mygradL[0] *= cL0.gradients."~lname~";
@@ -2288,6 +2572,8 @@ public:
                         goto case UnstructuredLimiter.venkat;
                     case UnstructuredLimiter.park:
                         goto case UnstructuredLimiter.venkat;
+                    case UnstructuredLimiter.park2:
+                        goto case UnstructuredLimiter.venkat;
                     case UnstructuredLimiter.hvan_albada:
                         goto case UnstructuredLimiter.venkat;
                     case UnstructuredLimiter.van_albada:
@@ -2301,6 +2587,10 @@ public:
                     case UnstructuredLimiter.venkat_mlp:
                         goto case UnstructuredLimiter.venkat;
                     case UnstructuredLimiter.hvenkat:
+                        goto case UnstructuredLimiter.venkat;
+                    case UnstructuredLimiter.venkat2:
+                        goto case UnstructuredLimiter.venkat;
+                    case UnstructuredLimiter.hvenkat2:
                         goto case UnstructuredLimiter.venkat;
                     case UnstructuredLimiter.venkat:
                         mygradR[0] *= cR0.gradients."~lname~";
@@ -2559,6 +2849,8 @@ public:
                         goto case UnstructuredLimiter.venkat;
                     case UnstructuredLimiter.park:
                         goto case UnstructuredLimiter.venkat;
+                    case UnstructuredLimiter.park2:
+                        goto case UnstructuredLimiter.venkat;
                     case UnstructuredLimiter.hvan_albada:
                         goto case UnstructuredLimiter.venkat;
                     case UnstructuredLimiter.van_albada:
@@ -2572,6 +2864,10 @@ public:
                     case UnstructuredLimiter.venkat_mlp:
                         goto case UnstructuredLimiter.venkat;
                     case UnstructuredLimiter.hvenkat:
+                        goto case UnstructuredLimiter.venkat;
+                    case UnstructuredLimiter.venkat2:
+                        goto case UnstructuredLimiter.venkat;
+                    case UnstructuredLimiter.hvenkat2:
                         goto case UnstructuredLimiter.venkat;
                     case UnstructuredLimiter.venkat:
                         mygradL[0] *= cL0.gradients."~lname~";

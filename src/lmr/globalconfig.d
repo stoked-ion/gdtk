@@ -564,6 +564,7 @@ enum UnstructuredLimiter {
     min_mod,
     barth,
     park,
+    park2,
     hvan_albada,
     van_albada,
     hnishikawa,
@@ -571,7 +572,9 @@ enum UnstructuredLimiter {
     hvenkat_mlp,
     venkat_mlp,
     hvenkat,
-    venkat
+    venkat,
+    hvenkat2,
+    venkat2
 }
 
 @nogc
@@ -582,6 +585,7 @@ string unstructured_limiter_name(UnstructuredLimiter ul)
     case UnstructuredLimiter.min_mod: return "min_mod";
     case UnstructuredLimiter.barth: return "barth";
     case UnstructuredLimiter.park: return "park";
+    case UnstructuredLimiter.park2: return "park2";
     case UnstructuredLimiter.hvan_albada: return "hvan_albada";
     case UnstructuredLimiter.van_albada: return "van_albada";
     case UnstructuredLimiter.hnishikawa: return "hnishikawa";
@@ -590,6 +594,8 @@ string unstructured_limiter_name(UnstructuredLimiter ul)
     case UnstructuredLimiter.venkat_mlp: return "venkat_mlp";
     case UnstructuredLimiter.hvenkat: return "hvenkat";
     case UnstructuredLimiter.venkat: return "venkat";
+    case UnstructuredLimiter.hvenkat2: return "hvenkat2";
+    case UnstructuredLimiter.venkat2: return "venkat2";
     }
 }
 
@@ -601,6 +607,7 @@ UnstructuredLimiter unstructured_limiter_from_name(string name)
     case "min_mod": return UnstructuredLimiter.min_mod;
     case "barth": return UnstructuredLimiter.barth;
     case "park": return UnstructuredLimiter.park;
+    case "park2": return UnstructuredLimiter.park2;
     case "hvan_albada": return UnstructuredLimiter.hvan_albada;
     case "van_albada": return UnstructuredLimiter.van_albada;
     case "hnishikawa": return UnstructuredLimiter.hnishikawa;
@@ -609,6 +616,8 @@ UnstructuredLimiter unstructured_limiter_from_name(string name)
     case "venkat_mlp": return UnstructuredLimiter.venkat_mlp;
     case "hvenkat": return UnstructuredLimiter.hvenkat;
     case "venkat": return UnstructuredLimiter.venkat;
+    case "hvenkat2": return UnstructuredLimiter.hvenkat2;
+    case "venkat2": return UnstructuredLimiter.venkat2;
     default:
         throw new FlowSolverException("Invalid unstructured limiter name");
     }

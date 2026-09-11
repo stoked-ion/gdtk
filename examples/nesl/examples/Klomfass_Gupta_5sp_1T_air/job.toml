@@ -1,0 +1,39 @@
+# Comparison case taken from:
+# Klomfass, A., and Müller, S. (1997) "Calculation of stagnation streamline quantities in hypersonic blunt body flows" Case 2.2
+# Shock Waves, Vol. 7, pp. 13-23
+
+# Freestream.
+T_INF = 264.0
+P_INF = 40.3
+U_INF = 7600.0
+MASS_FRAC = {N2 = 0.7654, O2 = 0.2345}
+
+# Geometry.
+RADIUS = 0.1524
+DOMAIN = 0.0095
+AXISYMMETRIC = true
+
+# Models.
+GAS_MODEL = "air-5sp.gas"
+CHEM_MODEL = "air-5sp.chem"
+
+# Grid.
+CELLS = 400
+CLUSTERING = 1.1
+
+# Wall.
+T_WALL = 1500.0
+VISCOSITY = true
+SENSOR = false
+LEWIS_NUM = 1.0
+
+# Time stepping.
+T_END = {steady = 1e-3}
+CFL_d = 0.1
+CFL_c = 0.1
+LTS = true
+
+# Output.
+SAVE = "klomfass.dat"
+PLOT = true
+VERBOSE = true

@@ -1504,7 +1504,7 @@ public:
         }
     }
 
-    void gather_residual_stencil_lists(int spatial_order_of_jacobian)
+    void gather_residual_stencil_lists(int spatial_order_of_jacobian, bool include_limiter_dependencies)
     {
         /*
           This function gathers references to the interfaces and cells
@@ -1579,6 +1579,26 @@ public:
             } // finished gathering cells
         }
 
+        if (include_limiter_dependencies) {
+            // Extend the stencil by one halo to capture sensitivities introduced by some of
+            // the unstructured limiters (e.g. park). This requires a second pass over the existing
+            // stencil cells, which performs some redundant work, but limiter linearization
+            // in the assembled Jacobian matrix is not typically used in production, so a
+            // more optimized implementation is not warranted.
+            const originalLength = unordered_cell_list.length;
+            for (size_t i = 0; i < originalLength; ++i) {
+                auto cell = unordered_cell_list[i];
+
+                foreach (ncell; cell.cell_cloud) {
+                    if (!cell_ids.canFind(ncell.id) && !ncell.is_ghost && ncell.is_interior_to_domain) {
+                        unordered_cell_list ~= ncell;
+                        cell_pos_array[ncell.id] = unordered_cell_list.length - 1;
+                        cell_ids ~= ncell.id;
+                    }
+                }
+            }
+        }
+
         // now sort the cells
         cell_ids.sort();
         foreach (id; cell_ids) { cell_list ~= unordered_cell_list[cell_pos_array[id]]; }
@@ -1597,7 +1617,7 @@ public:
 
     } // end gather_residual_stencil_lists()
 
-    void gather_residual_stencil_lists_for_ghost_cells(int spatial_order_of_jacobian, FluidFVCell[] neighbour_cell_cloud)
+    void gather_residual_stencil_lists_for_ghost_cells(int spatial_order_of_jacobian, FluidFVCell[] neighbour_cell_cloud, bool include_limiter_dependencies)
     {
         /*
           This function gathers references to the interfaces and cells
@@ -1620,7 +1640,9 @@ public:
              spatial_order_of_jacobian == 0) { nearest_neighbours_only = true; }
 
         // this first order stencil includes the ghost cells nearest neighbours
+        size_t[] cell_ids;
         cell_list ~= neighbour_cell_cloud[0]; // this is the interior cell that shares an interface
+        cell_ids ~= neighbour_cell_cloud[0].id;
 
         bool extended_neighbours = false;
         if ( (spatial_order_of_jacobian >= 2) ||
@@ -1632,10 +1654,28 @@ public:
 
             // gather cells
             foreach (c; neighbour_cell_cloud) {
-                if ( c.id != id && c.id != neighbour_cell_cloud[0].id && !c.is_ghost && c.is_interior_to_domain) {
+                bool cell_exists = cell_ids.canFind(c.id);
+                if (!cell_exists && !c.is_ghost && c.is_interior_to_domain) {
                     cell_list ~= c;
+                    cell_ids ~= c.id;
                 }
             } // finished gathering cells
+        }
+
+        if (include_limiter_dependencies) {
+            // Include one additional halo for dependencies introduced by some of the unstructured limiters.
+            const originalLength = cell_list.length;
+
+            for (size_t i = 0; i < originalLength; ++i) {
+                auto cell = cell_list[i];
+
+                foreach (ncell; cell.cell_cloud) {
+                    if (!cell_ids.canFind(ncell.id) && !ncell.is_ghost && ncell.is_interior_to_domain) {
+                        cell_list ~= ncell;
+                        cell_ids ~= ncell.id;
+                    }
+                }
+            }
         }
 
         // gather faces

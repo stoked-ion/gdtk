@@ -1,0 +1,38 @@
+# Comparison case taken from:
+# Hannemann (2003), "High Enthalpy Flows in the HEG Shock Tunnel: Experiment and Numerical Rebuilding"
+# AIAA Paper 2003-0978, DOI: 10.2514/6.2003-978
+
+# Freestream.
+T_INF = 694.0
+P_INF = 687.0
+U_INF = 4776.0
+MASS_FRAC = {N2 = 0.73555, O2 = 0.1340, NO = 0.05090, N = 0.0, O = 0.07955}
+
+# Geometry.
+RADIUS = 0.045
+DOMAIN = 0.013
+AXISYMMETRIC = false
+
+# Models.
+GAS_MODEL = "air-7sp.gas"
+CHEM_MODEL = "air-7sp.chem"
+
+# Grid.
+CELLS = 400
+CLUSTERING = 1.005
+
+# Wall.
+T_WALL = 300.0
+VISCOSITY = true
+CATALYTIC = "fixed_composition"
+WALL_MASS_FRAC = {N2 = 0.73555, O2 = 0.1340, NO = 0.05090, N = 0.0, O = 0.07955}
+LEWIS_NUM = 1.4
+
+# Time stepping.
+T_END = {steady = 1e-2}
+CFL_d = 0.2
+LTS = true
+
+# Output.
+SAVE = "HEG.dat"
+VERBOSE = true

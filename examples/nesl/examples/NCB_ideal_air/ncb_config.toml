@@ -1,0 +1,7 @@
+T_BOUND = 300.0
+
+RHO_BOUND = {lower = 0.1, upper = 0.5, cells = 24, bound_type = 'linear'}
+
+U_BOUND = 6000.0
+
+DOMAIN_SCALE = 1.2

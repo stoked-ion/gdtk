@@ -1,0 +1,563 @@
+\documentclass[10pt,a4paper]{article}
+
+% Standard packages.
+\usepackage{lmodern}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage[margin=1in]{geometry}
+\usepackage{booktabs}
+\usepackage{longtable}
+\usepackage{array}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage[most]{tcolorbox}
+\usepackage{microtype}
+\usepackage[hidelinks]{hyperref}
+\usepackage{parskip}
+
+% Define some colours, got from eye dropper on the user guide for SLF.
+\definecolor{shadecolor}{RGB}{248,248,248}
+\definecolor{codekey}{RGB}{5,41,125}
+\definecolor{codestring}{RGB}{64,112,160}
+\definecolor{codecomment}{RGB}{97,161,176}
+\definecolor{codebool}{RGB}{0,112,33}
+
+% Stop -- turning into en-dash in plain text, for CLI commands.
+\DisableLigatures[-]{encoding = T1, family = tt*}
+
+% Allows underscores to override line breaks in longtable.
+\let\origunderscore\_
+\renewcommand{\_}{\origunderscore\penalty4000\relax}
+\newcolumntype{L}[1]{>{\raggedright\arraybackslash}p{#1}}
+
+% Loosen tolerance for line breaking.
+\tolerance=1200
+\setlength{\emergencystretch}{3em}
+
+% Settings to make code blocks look like Python.
+\lstdefinestyle{py}{
+    basicstyle=\ttfamily\small,
+    commentstyle=\color{codecomment}\itshape,
+    morecomment=[l]{\#},
+    morestring=[b]",
+    morestring=[b]',
+    stringstyle=\color{codestring},
+    alsoletter={_},
+    emph={config, gas_model_file, chem_model_file,
+    reacting, axisymmetric, adiabatic, catalytic, verbose,
+    export, eta_end, n_y_cells, n_x_cells, max_iters, tol,
+    omega, gmodel, reactor, init_gas_model, BoundaryLayer,
+    ViscousInteraction, run, x_arr, u_e_arr, T_e_arr, P_e_arr,
+    massf_e_arr, r_arr, T_wall, massf, x_start, x_end, theta,
+    d_star_idx},
+    emphstyle={\color{codekey}},
+    emph=[2]{True,False},
+    emphstyle=[2]{\color{codebool}\bfseries},
+    frame=none,
+    showstringspaces=false,
+    columns=fullflexible,
+    keepspaces=true,
+    breaklines=true,
+}
+\lstdefinestyle{plain}{
+    basicstyle=\ttfamily\small,
+    emph={},
+    emph=[2]{},
+    frame=none,
+    columns=fullflexible,
+    keepspaces=true,
+    breaklines=true,
+}
+\lstset{style=py}
+
+% Put a shaded box around listings.
+\tcolorboxenvironment{lstlisting}{
+    breakable,
+    colback=shadecolor,
+    colframe=shadecolor,
+    boxrule=0pt,
+    arc=4pt, outer arc=4pt,
+    boxsep=0pt,
+    left=6pt, right=6pt, top=6pt, bottom=6pt,
+    grow to left by=6pt, grow to right by=6pt,
+    before skip=8pt, after skip=8pt,
+}
+
+%+++++++++++++++++++++++++++++++++++++++++++++
+%             Preamble ends here
+%+++++++++++++++++++++++++++++++++++++++++++++
+
+\title{CRBL: Reference Manual}
+\author{\textit{Taine J. Rossini}}
+\date{Version 1.0.0.}
+
+\begin{document}
+\maketitle
+
+\section*{Abstract}
+
+This document lists every setting recognised by \texttt{crbl}, the chemically reacting boundary-layer solver, along with the arguments of its two solver classes, \texttt{BoundaryLayer} and \texttt{ViscousInteraction}. Anything not listed here is ignored.
+
+% \tableofcontents
+
+\section*{Command line}
+
+\begin{lstlisting}[style=plain]
+crbl [option]
+
+    --help          Displays the help message and exits.
+    --bl=<file>     Runs a boundary-layer simulation using a .py configuration file.
+    --vi=<file>     Runs a viscous-interaction simulation over a flat plate or
+                    wedge using a .py configuration file.
+\end{lstlisting}
+
+One option is given per run.
+
+\begin{itemize}
+    \item \textbf{\texttt{--bl=<file>}} runs the boundary-layer described by the configuration file.
+    \item \textbf{\texttt{--vi=<file>}} runs the viscous interaction described by the same kind of file.
+    \item Running with no argument, or with \texttt{--help}, prints the banner and exits.
+\end{itemize}
+
+The two options select which solver is run, not which one the file builds; a file that builds a \texttt{ViscousInteraction} but is passed to \texttt{--bl} does nothing.
+
+\section*{The configuration script}
+
+The configuration file is a Python script, executed inside \texttt{crbl}'s own namespace. It does not need to import anything itself: every name below is already available in that namespace when the script runs.
+
+\begin{longtable}{@{}L{40mm}L{114mm}@{}}
+    \toprule
+    \textbf{Name} & \textbf{Description} \\
+    \midrule
+    \endfirsthead
+    \toprule
+    \textbf{Name} & \textbf{Description} \\
+    \midrule
+    \endhead
+    \bottomrule
+    \endfoot
+    \endlastfoot
+    \texttt{config} & The global solver configuration object, described below. \\
+    \addlinespace
+    \texttt{BoundaryLayer} & The boundary-layer solver class. \\
+    \addlinespace
+    \texttt{ViscousInteraction} & The viscous-interaction solver class. \\
+    \addlinespace
+    \texttt{np} & \texttt{numpy}. \\
+    \addlinespace
+    \texttt{eqc} & The \texttt{equilibrium-c} module, for building an equilibrium inflow. \\
+    \addlinespace
+    \texttt{GasModel}, \texttt{GasState}, \texttt{GasFlow} & The \texttt{gdtk} gas objects. \\
+    \bottomrule
+\end{longtable}
+
+A script has three jobs, in this order.
+
+\begin{itemize}
+    \item Set the \texttt{config} fields it wants to change from their defaults.
+    \item Call \textbf{\texttt{config.init\_gas\_model()}}, which loads the gas-model and, if \texttt{chem\_model\_file} is set, the reactor. This must happen before the solver object is constructed, since the constructor reads \texttt{config.gmodel}.
+    \item Construct exactly one \texttt{BoundaryLayer} or \texttt{ViscousInteraction} object.
+\end{itemize}
+
+\section*{Solver settings}
+
+All of these are attributes of the global \texttt{config} object.
+
+\subsection*{Required settings}
+
+\begin{center}
+    \begin{tabular}{@{}lL{22mm}L{100mm}@{}}
+    \toprule
+    \textbf{Key} & \textbf{Type} & \textbf{Description} \\
+    \midrule
+    \texttt{gas\_model\_file} & string & Path to the gas-model file. The run aborts if it is empty or the file is missing. \\
+    \bottomrule
+    \end{tabular}
+\end{center}
+
+\texttt{config.init\_gas\_model()} must then be called to load it.
+
+\subsection*{Models and physics}
+
+\begin{longtable}{@{}lL{18mm}L{20mm}L{78mm}@{}}
+    \toprule
+    \textbf{Key} & \textbf{Type} & \textbf{Default} & \textbf{Description} \\
+    \midrule
+    \endfirsthead
+    \toprule
+    \textbf{Key} & \textbf{Type} & \textbf{Default} & \textbf{Description} \\
+    \midrule
+    \endhead
+    \bottomrule
+    \endfoot
+    \endlastfoot
+    \texttt{chem\_model\_file} & string & \texttt{""} & Path to the reaction file. Required when \texttt{reacting} is on; ignored when it is off. \\
+    \addlinespace
+    \texttt{reacting} & bool & \texttt{False} & Solves a species conservation equation for each species with a finite-rate source term. With this off the composition is frozen at the edge value. \\
+    \addlinespace
+    \texttt{axisymmetric} & bool & \texttt{False} & Solves the axisymmetric form, scaling the streamwise coordinate by the body radius \texttt{r\_arr}. \\
+    \addlinespace
+    \texttt{adiabatic} & bool & \texttt{False} & Zero enthalpy gradient at the wall instead of a fixed \texttt{T\_wall}. \\
+    \addlinespace
+    \texttt{catalytic} & bool & \texttt{False} & Fully catalytic wall. Also enables the diffusive heat flux, which is zero otherwise. \\
+    \bottomrule
+\end{longtable}
+
+\subsubsection*{Wall models}
+
+\begin{itemize}
+    \item \textbf{Non-catalytic}, the default, fixes a zero species gradient across the wall.
+    \item \textbf{\texttt{catalytic = True}} holds the wall composition at equilibrium for the local edge pressure and wall temperature, and is the only setting under which the diffusive heat flux $q_d$ is computed (zero otherwise). It has no effect unless \texttt{reacting} is also on.
+    \item \textbf{\texttt{adiabatic = True}} replaces the isothermal wall with a zero-gradient condition on the total enthalpy, so \texttt{T\_wall} is ignored. It is not implemented for reacting flows.
+\end{itemize}
+
+\subsection*{Grid}
+
+\begin{longtable}{@{}lL{16mm}L{18mm}L{84mm}@{}}
+    \toprule
+    \textbf{Key} & \textbf{Type} & \textbf{Default} & \textbf{Description} \\
+    \midrule
+    \endfirsthead
+    \toprule
+    \textbf{Key} & \textbf{Type} & \textbf{Default} & \textbf{Description} \\
+    \midrule
+    \endhead
+    \bottomrule
+    \endfoot
+    \endlastfoot
+    \texttt{eta\_end} & float & \texttt{6.0} & End of the similarity domain, where the freestream begins. Must sit outside the layer. \\
+    \addlinespace
+    \texttt{n\_y\_cells} & int & \texttt{100} & Number of points across the layer, evenly spaced in $\eta$. \\
+    \addlinespace
+    \texttt{n\_x\_cells} & int & \texttt{100} & Number of streamwise marching stations. \\
+    \bottomrule
+\end{longtable}
+
+\texttt{n\_x\_cells} is used differently by the two solvers.
+
+\begin{itemize}
+    \item \textbf{\texttt{BoundaryLayer}} overwrites it with \texttt{len(x\_arr)} on construction, so the value set in the script only matters as a way of sizing the edge arrays that are then passed in.
+    \item \textbf{\texttt{ViscousInteraction}} builds its own station distribution from \texttt{x\_start} to \texttt{x\_end}, so the setting takes effect directly.
+\end{itemize}
+
+\subsection*{Iteration}
+
+Each station is solved using Picard iteration: momentum, then the stream function, then energy, then species, repeated until the largest change in any profile falls below \texttt{tol}.
+
+\begin{longtable}{@{}lL{16mm}L{18mm}L{84mm}@{}}
+    \toprule
+    \textbf{Key} & \textbf{Type} & \textbf{Default} & \textbf{Description} \\
+    \midrule
+    \endfirsthead
+    \toprule
+    \textbf{Key} & \textbf{Type} & \textbf{Default} & \textbf{Description} \\
+    \midrule
+    \endhead
+    \bottomrule
+    \endfoot
+    \endlastfoot
+    \texttt{max\_iters} & int & \texttt{100} & Maximum Picard iterations per station. The station is accepted as it stands when this is reached. \\
+    \addlinespace
+    \texttt{tol} & float & \texttt{1e-4} & Convergence tolerance on the largest absolute change in $U$, $g$ or any species profile between iterations. \\
+    \addlinespace
+    \texttt{omega} & float & \texttt{0.1} & Under-relaxation factor. Each new profile enters as $\omega\,\phi_{new} + (1-\omega)\,\phi_{old}$, so small values are slow but stable. \\
+    \bottomrule
+\end{longtable}
+
+\subsection*{Output}
+
+\begin{center}
+    \begin{tabular}{@{}lL{16mm}L{18mm}L{84mm}@{}}
+    \toprule
+    \textbf{Key} & \textbf{Type} & \textbf{Default} & \textbf{Description} \\
+    \midrule
+    \texttt{verbose} & bool & \texttt{True} & Prints a line per station with the wall clock, iteration count and residual, and a line per viscous-interaction iteration. \\
+    \addlinespace
+    \texttt{export} & bool & \texttt{True} & Writes \texttt{loads.dat} and \texttt{output.vts} at the end of the run. \\
+    \bottomrule
+    \end{tabular}
+\end{center}
+
+\section*{BoundaryLayer settings}
+
+Solves the flow-field over an arbitrary geometry, given the inviscid edge condition as a function of the body arc length $x$. Every array is indexed by station and must be \texttt{n\_x\_cells} long, that being the length of \texttt{x\_arr}.
+
+\begin{longtable}{@{}lL{28mm}L{18mm}L{70mm}@{}}
+    \toprule
+    \textbf{Argument} & \textbf{Type} & \textbf{Default} & \textbf{Description} \\
+    \midrule
+    \endfirsthead
+    \toprule
+    \textbf{Argument} & \textbf{Type} & \textbf{Default} & \textbf{Description} \\
+    \midrule
+    \endhead
+    \bottomrule
+    \endfoot
+    \endlastfoot
+    \texttt{x\_arr} & array \texttt{(nx,)} & required & Body arc length, m. Must be increasing and must start above zero. \\
+    \addlinespace
+    \texttt{u\_e\_arr} & array \texttt{(nx,)} & required & Edge velocity, m/s. \\
+    \addlinespace
+    \texttt{T\_e\_arr} & array \texttt{(nx,)} & required & Edge temperature, K. \\
+    \addlinespace
+    \texttt{P\_e\_arr} & array \texttt{(nx,)} & required & Edge pressure, Pa. The streamwise pressure gradient is calculated from this array directly. \\
+    \addlinespace
+    \texttt{massf\_e\_arr} & array \texttt{(nx, nsp)} & required & Edge mass fractions, one row per station, ordered as in the gas-model. Must be a numpy array. \\
+    \addlinespace
+    \texttt{r\_arr} & array \texttt{(nx,)} & \texttt{None} & Body radius, m. Only used when \texttt{axisymmetric} is on, and required by it. \\
+    \addlinespace
+    \texttt{T\_wall} & float & \texttt{300.0} & Isothermal wall temperature, K. Ignored when \texttt{adiabatic} is on. \\
+    \bottomrule
+\end{longtable}
+
+The first station must sit at $x > 0$; the transformed streamwise coordinate is zero at the leading edge and the solution is undefined there.
+
+\section*{ViscousInteraction settings}
+
+Solves the viscous-inviscid interaction over a flat plate or wedge. The boundary-layer is solved, its displacement thickness then fed to the tangent-wedge method to get a new edge pressure distribution, and then iterated on until the pressure converges.
+
+\begin{longtable}{@{}lL{20mm}L{20mm}L{74mm}@{}}
+    \toprule
+    \textbf{Argument} & \textbf{Type} & \textbf{Default} & \textbf{Description} \\
+    \midrule
+    \endfirsthead
+    \toprule
+    \textbf{Argument} & \textbf{Type} & \textbf{Default} & \textbf{Description} \\
+    \midrule
+    \endhead
+    \bottomrule
+    \endfoot
+    \endlastfoot
+    \texttt{u} & float & required & Freestream velocity, m/s. \\
+    \addlinespace
+    \texttt{p} & float & required & Freestream pressure, Pa. \\
+    \addlinespace
+    \texttt{T} & float & required & Freestream temperature, K. \\
+    \addlinespace
+    \texttt{massf} & list \texttt{(nsp,)} & required & Freestream mass fractions, ordered as in the gas-model. \\
+    \addlinespace
+    \texttt{T\_wall} & float & \texttt{300.0} & Isothermal wall temperature, K. \\
+    \addlinespace
+    \texttt{x\_start} & float & \texttt{1e-5} & First station, m. Must be larger than zero. \\
+    \addlinespace
+    \texttt{x\_end} & float & \texttt{0.1} & Last station, m. \\
+    \addlinespace
+    \texttt{theta} & float & \texttt{0.0} & Wedge half-angle, \emph{degrees}. Zero is a flat plate. \\
+    \addlinespace
+    \texttt{tol} & float & \texttt{1.0} & Convergence tolerance on the edge pressure, Pa. \\
+    \addlinespace
+    \texttt{d\_star\_idx} & int & \texttt{100} & Number of points used to fit the displacement-thickness curve. \\
+    \bottomrule
+\end{longtable}
+
+A few things are worth knowing about the loop.
+
+\begin{itemize}
+    \item \textbf{A non-zero \texttt{theta}} is resolved with an oblique shock first; the post-shock state replaces the inflow and the stations run along the wedge surface.
+    \item \textbf{\texttt{tol}} is an absolute change in Pa between iterations, not a normalised residual, so set it against the pressure level of the case.
+    \item \textbf{The loop is capped at 30 iterations}, which is not adjustable.
+    \item \textbf{\texttt{d\_star\_idx}} thins the displacement-thickness curve before interpolating, keeping numerical wobble out of the surface slope. Too many points and the slope oscillates, taking the shock-angle relation outside its valid range and crashing the run.
+\end{itemize}
+
+\section*{Output}
+
+With \texttt{export} on, two files are written into the working directory at the end of the run, both overwritten without warning.
+
+\subsection*{\texttt{loads.dat}}
+
+One row per station, comma separated, with the header
+\begin{lstlisting}[style=plain]
+x (m), d (m), d* (m), p (Pa), tau (Pa), q_c (W/m^2), q_d (W/m^2)
+\end{lstlisting}
+
+being the arc length, boundary-layer height, displacement thickness, edge pressure, wall shear stress, and the convective and diffusive heat fluxes.
+
+\subsection*{\texttt{output.vts}}
+
+The full field as a VTK structured grid, on the physical $(x, y)$ coordinates. The point data carries \texttt{vel.x}, \texttt{T}, \texttt{rho}, \texttt{k}, \texttt{mu} and one \texttt{massf-<species>} array per species.
+
+\section*{A complete configuration script}
+
+A reacting boundary-layer, run with \texttt{--bl}.
+
+\begin{lstlisting}
+# Setup solver.
+config.gas_model_file = "air-7sp.gas"
+config.chem_model_file = "air-7sp.chem"
+config.reacting = True
+config.n_x_cells = 500
+config.n_y_cells = 500
+config.init_gas_model()
+
+# Freestream conditions.
+u1 = 8601
+p1 = 530
+T1 = 1936
+massf1 = [0.767, 0.233, 0, 0, 0, 0, 0]
+
+# Edge conditions along the body.
+x = np.linspace(0.0001, 0.13, config.n_x_cells)
+P_e = p1 * (1 + 0.05 / np.sqrt(x))
+u_e = np.full(config.n_x_cells, u1)
+T_e = np.full(config.n_x_cells, T1)
+mass_f_e = np.full((config.n_x_cells, config.gmodel.n_species), massf1)
+
+BoundaryLayer(x_arr=x, u_e_arr=u_e, T_e_arr=T_e, P_e_arr=P_e, massf_e_arr=mass_f_e)
+\end{lstlisting}
+
+Invoked as,
+\begin{lstlisting}[style=plain]
+crbl --bl=job.py
+\end{lstlisting}
+
+The viscous interaction over the same plate, run with \texttt{--vi}. The inflow is brought to equilibrium first, which is the usual way to start these.
+
+\begin{lstlisting}
+# Setup solver.
+config.gas_model_file = "air-7sp.gas"
+config.chem_model_file = "air-7sp.chem"
+config.reacting = True
+config.n_x_cells = 200
+config.n_y_cells = 100
+config.export = False
+config.catalytic = True
+config.omega = 0.5
+config.init_gas_model()
+
+# Freestream conditions.
+u1 = 8601
+p1 = 530
+T1 = 1936
+massf1 = [0.767, 0.233, 0, 0, 0, 0, 0]
+
+# Convert to an equilibrium inflow.
+eq = eqc.EqCalculator(config.gmodel.species_names)
+Y0 = np.array(massf1)
+X0 = eq.YtoX(Y0)
+X1 = eq.pt(p=p1, T=T1, Xs0=X0)
+Y1 = eq.XtoY(X1).tolist()
+
+ViscousInteraction(u=u1, p=p1, T=T1, massf=Y1, x_end=0.13)
+\end{lstlisting}
+
+Invoked as,
+\begin{lstlisting}[style=plain]
+crbl --vi=job.py
+\end{lstlisting}
+
+\section*{Using CRBL as a library}
+\label{sec:library}
+
+The same two classes can be driven from an ordinary Python script, which is the way to get at the profiles rather than just the wall loads. The settings are identical; the only differences are that the script imports what it needs, and that you must call \texttt{run()} itself and unpack the result.
+
+\begin{lstlisting}
+# Load libraries.
+from crbl import BoundaryLayer, config
+import matplotlib.pyplot as plt
+import numpy as np
+
+# Setup solver.
+config.gas_model_file = "air-7sp.gas"
+config.chem_model_file = "air-7sp.chem"
+config.reacting = True
+config.init_gas_model()
+
+# Edge conditions.
+x = np.linspace(0.0001, 0.13, config.n_x_cells)
+P_e = 530 * (1 + 0.05 / np.sqrt(x))
+u_e = np.full(config.n_x_cells, 8601)
+T_e = np.full(config.n_x_cells, 1936)
+mass_f_e = np.full((config.n_x_cells, config.gmodel.n_species), [0.767, 0.233, 0, 0, 0, 0, 0])
+
+# Call solver.
+bl = BoundaryLayer(x_arr=x, u_e_arr=u_e, T_e_arr=T_e, P_e_arr=P_e, massf_e_arr=mass_f_e)
+
+eta, y, bl_height, delta_star, U, massf, rho, T, k, mu, tau_w, q_c, q_d = bl.run()
+
+# Plot the displacement thickness.
+plt.plot(x, delta_star)
+plt.show()
+\end{lstlisting}
+
+\subsection*{What \texttt{BoundaryLayer.run()} returns}
+
+Thirteen arrays, in this order. \texttt{nx} is the number of stations, \texttt{ny} is \texttt{n\_y\_cells} and \texttt{nsp} is the number of species.
+
+\begin{longtable}{@{}lL{28mm}L{88mm}@{}}
+    \toprule
+    \textbf{Name} & \textbf{Shape} & \textbf{Description} \\
+    \midrule
+    \endfirsthead
+    \toprule
+    \textbf{Name} & \textbf{Shape} & \textbf{Description} \\
+    \midrule
+    \endhead
+    \bottomrule
+    \endfoot
+    \endlastfoot
+    \texttt{eta} & \texttt{(nx, ny)} & Similarity coordinate, the same row repeated. \\
+    \addlinespace
+    \texttt{y} & \texttt{(nx, ny)} & Physical wall-normal coordinate, m. \\
+    \addlinespace
+    \texttt{bl\_height} & \texttt{(nx,)} & Height at which $u$ first reaches 99\% of the edge value, m. \texttt{NaN} where the layer does not get there. \\
+    \addlinespace
+    \texttt{delta\_star} & \texttt{(nx,)} & Displacement thickness, m. \\
+    \addlinespace
+    \texttt{U} & \texttt{(nx, ny)} & Velocity, m/s. Dimensional, not the normalised profile. \\
+    \addlinespace
+    \texttt{massf} & \texttt{(nx, ny, nsp)} & Mass fractions. \\
+    \addlinespace
+    \texttt{rho} & \texttt{(nx, ny)} & Density, kg/m$^3$. \\
+    \addlinespace
+    \texttt{T} & \texttt{(nx, ny)} & Temperature, K. \\
+    \addlinespace
+    \texttt{k} & \texttt{(nx, ny)} & Thermal conductivity, W/m/K. \\
+    \addlinespace
+    \texttt{mu} & \texttt{(nx, ny)} & Dynamic viscosity, Pa\,s. \\
+    \addlinespace
+    \texttt{tau\_w} & \texttt{(nx,)} & Wall shear stress, Pa. \\
+    \addlinespace
+    \texttt{q\_c} & \texttt{(nx,)} & Conductive heat flux at the wall, W/m$^2$. \\
+    \addlinespace
+    \texttt{q\_d} & \texttt{(nx,)} & Diffusive heat flux at the wall, W/m$^2$. \\
+    \bottomrule
+\end{longtable}
+
+\subsection*{What \texttt{ViscousInteraction.run()} returns}
+
+\texttt{ViscousInteraction} is driven the same way: construct it, then call \texttt{run()} directly. It returns six arrays, all \texttt{(nx,)}, taken from the last completed iteration.
+
+\begin{center}
+    \begin{tabular}{@{}lL{116mm}@{}}
+    \toprule
+    \textbf{Name} & \textbf{Description} \\
+    \midrule
+    \texttt{x} & Station coordinate along the surface, m. \\
+    \addlinespace
+    \texttt{d\_star} & Displacement thickness, m. \\
+    \addlinespace
+    \texttt{P\_e} & Edge pressure, Pa. \\
+    \addlinespace
+    \texttt{tau\_w} & Wall shear stress, Pa. \\
+    \addlinespace
+    \texttt{q\_c} & Conductive heat flux at the wall, W/m$^2$. \\
+    \addlinespace
+    \texttt{q\_d} & Diffusive heat flux at the wall, W/m$^2$. \\
+    \bottomrule
+    \end{tabular}
+\end{center}
+
+\section*{Improving stability}
+
+Settings worth adjusting first when a run will not converge.
+
+\begin{itemize}
+    \item Lower \texttt{omega}, e.g. to 0.05-0.1, and raise \texttt{max\_iters} to match.
+    \item Tighten \texttt{tol} to 1e-5 or below on reacting runs; the chemistry is not resolved at the default.
+    \item Increase \texttt{n\_y\_cells} to better resolve the wall gradients that set the heat flux and shear stress.
+    \item Check \texttt{eta\_end} is far enough out that the profiles have flattened onto the edge condition before the domain ends.
+    \item Increase \texttt{n\_x\_cells}, or start the first station closer to the leading edge, where the streamwise steps are largest in transformed space.
+    \item Adjust \texttt{d\_star\_idx} when a viscous-interaction run reports that the tangent-wedge method failed.
+\end{itemize}
+
+\end{document}

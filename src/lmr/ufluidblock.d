@@ -954,13 +954,16 @@ public:
                             c.gradients.barth_limit(c.cell_cloud, *(c.ws), myConfig);
                             break;
                         case UnstructuredLimiter.park:
-                            c.gradients.park_limit(c.cell_cloud, *(c.ws), myConfig);
+                            c.gradients.park_limit(c.cell_cloud, *(c.ws), myConfig, gtl);
+                            break;
+                        case UnstructuredLimiter.park2:
+                            c.gradients.park2_limit(c.cell_cloud, *(c.ws), myConfig, gtl);
                             break;
                         case UnstructuredLimiter.hvan_albada:
-                            c.gradients.van_albada_limit(c.cell_cloud, *(c.ws), true, myConfig);
+                            c.gradients.van_albada_limit(c.cell_cloud, *(c.ws), true, myConfig, gtl);
                             break;
                         case UnstructuredLimiter.van_albada:
-                            c.gradients.van_albada_limit(c.cell_cloud, *(c.ws), false, myConfig);
+                            c.gradients.van_albada_limit(c.cell_cloud, *(c.ws), false, myConfig, gtl);
                             break;
                         case UnstructuredLimiter.hnishikawa:
                             c.gradients.nishikawa_limit(c.cell_cloud, *(c.ws), true, myConfig, gtl);
@@ -979,6 +982,12 @@ public:
                             break;
                         case UnstructuredLimiter.venkat:
                             c.gradients.venkat_limit(c.cell_cloud, *(c.ws), false, myConfig, gtl);
+                            break;
+                        case UnstructuredLimiter.hvenkat2:
+                            c.gradients.venkat2_limit(c.cell_cloud, *(c.ws), true, myConfig, gtl);
+                            break;
+                        case UnstructuredLimiter.venkat2:
+                            c.gradients.venkat2_limit(c.cell_cloud, *(c.ws), false, myConfig, gtl);
                             break;
                     } // end switch
                 } // end foreach c

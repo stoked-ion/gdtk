@@ -10,6 +10,7 @@
 module lmr.dualtimestepping;
 
 import core.memory : GC;
+import core.time : MonoTime;
 import core.stdc.stdlib : exit;
 import std.algorithm : min;
 import std.algorithm.searching : countUntil;
@@ -220,6 +221,8 @@ void initDualTimeNewtonKrylovSimulation(int snapshotStart, int maxCPUs, int thre
     if ((cfg.interpolation_order > 1) &&
         ((cfg.unstructured_limiter == UnstructuredLimiter.hvenkat) ||
          (cfg.unstructured_limiter == UnstructuredLimiter.venkat) ||
+         (cfg.unstructured_limiter == UnstructuredLimiter.hvenkat2) ||
+         (cfg.unstructured_limiter == UnstructuredLimiter.venkat2) ||
          (cfg.unstructured_limiter == UnstructuredLimiter.hvenkat_mlp) ||
          (cfg.unstructured_limiter == UnstructuredLimiter.venkat_mlp))) {
         initUSGlimiters();
@@ -498,8 +501,6 @@ void performDualTimeNewtonKrylovUpdates(int snapshotStart, double startCFL, int 
     double wall_clock_elapsed;
     SimState.wall_clock_start = Clock.currTime();
     SimState.target_time = cfg.max_time;
-    double physicalityCheckWallTime;
-    double lineSearchWallTime;
 
     // Normally, we can terminate upon either reaching a maximum time or upon reaching a maximum iteration count.
     shared bool finished_time_stepping = (SimState.time >= SimState.target_time) || (SimState.step >= cfg.max_step);
@@ -522,11 +523,11 @@ void performDualTimeNewtonKrylovUpdates(int snapshotStart, double startCFL, int 
 
         // evaluate a reference residual for the nonlinear solve
         evalResidualWorker(0);
-        setResiduals();
-        addUnsteadyTermToResiduals();
+        fillResidualVector();
+        addUnsteadyTermToResidualVector();
         computeGlobalResidual();
         referenceGlobalResidual = globalResidual;
-        computeResiduals(referenceResiduals);
+        computeMaxResiduals(referenceResiduals);
         // Add value of 1.0 to each residaul.
         // If values are very large, 1.0 makes no difference.
         // If values are zero, the 1.0 should mean the reference residual
@@ -540,6 +541,7 @@ void performDualTimeNewtonKrylovUpdates(int snapshotStart, double startCFL, int 
 
         // solve nonlinear system using Newton-Krylov solver with pseudo time stepping
         foreach (step; 1 .. nkCfg.maxNewtonSteps+1) {
+            routineWallTimeTicks[] = 0;
             cumulativeNewtonSteps += 1;
             //----
             // 0. Check for any special actions based on step to perform at START of step
@@ -621,16 +623,18 @@ void performDualTimeNewtonKrylovUpdates(int snapshotStart, double startCFL, int 
             }
 
             // 1a. perform a physicality check if required
-            auto physicalityCheckWallTimeStart = Clock.currTime();
+            auto physicalityCheckWallTimeStart = MonoTime.currTime().ticks;
             omega = nkCfg.usePhysicalityCheck ? determineRelaxationFactor() : 1.0;
-            physicalityCheckWallTime = to!double((Clock.currTime() - physicalityCheckWallTimeStart).total!"msecs"())/1000.0;
+            routineWallTimeTicks[WallTimeIndex.physicalityCheck] =
+                elapsedTicks(physicalityCheckWallTimeStart);
 
             // 1b. do a line search if required
-            auto lineSearchWallTimeStart = Clock.currTime();
+            auto lineSearchWallTimeStart = MonoTime.currTime().ticks;
             if ( (omega > nkCfg.minRelaxationFactorForUpdate) && nkCfg.useLineSearch ) {
                 omega = applyLineSearch(omega, currentPhase, stepsIntoCurrentPhase);
             }
-            lineSearchWallTime = to!double((Clock.currTime() - lineSearchWallTimeStart).total!"msecs"())/1000.0;
+            routineWallTimeTicks[WallTimeIndex.lineSearch] =
+                elapsedTicks(lineSearchWallTimeStart);
 
             // 1c. check if we achived the allowable linear solver tolerance
             bool failedToAchieveAllowableLinearSolverTolerance =
@@ -642,6 +646,11 @@ void performDualTimeNewtonKrylovUpdates(int snapshotStart, double startCFL, int 
                 // We think??? If not, we bail at this point.
                 try {
                     applyNewtonUpdate(omega);
+
+                    // Update the residual state as soon as the Newton update is accepted;
+                    // the stopping checks use the updated global residual value.
+                    assembleResidualVector(0, currentPhase, stepsIntoCurrentPhase);
+                    computeGlobalResidual();
                 }
                 catch (NewtonKrylovException e) {
                     // We need to bail out at this point.
@@ -690,7 +699,7 @@ void performDualTimeNewtonKrylovUpdates(int snapshotStart, double startCFL, int 
 
             // 2a. Reporting (to files and screen)
             if (((step % nkCfg.stepsBetweenDiagnostics) == 0) || (finalStep && nkCfg.writeDiagnosticsOnLastStep)) {
-                writeDiagnostics(step, dt, cfl, wall_clock_elapsed, physicalityCheckWallTime, lineSearchWallTime, omega, currentPhase, residualsUpToDate);
+                writeDiagnostics(step, dt, cfl, wall_clock_elapsed, omega, currentPhase, residualsUpToDate);
             }
             version(mpi_parallel) { MPI_Barrier(MPI_COMM_WORLD); }
             // Reporting to screen on progress.
@@ -880,7 +889,7 @@ void performDualTimeNewtonKrylovUpdates(int snapshotStart, double startCFL, int 
  * Authors: RJG and KAD
  * Date: 2025-09-07
  */
-void addUnsteadyTermToResiduals(int ftl=0)
+void addUnsteadyTermToResidualVector(int ftl=0)
 {
     size_t nConserved = GlobalConfig.cqi.n;
     int bdfOrder = dtsController.bdfOrder;
@@ -997,7 +1006,7 @@ void printNewtonStepStatusToScreen(int step, double cfl, double dt, ref bool res
     alias cfg = GlobalConfig;
 
     if (!residualsUpToDate) {
-        computeResiduals(currentResiduals);
+        computeMaxResiduals(currentResiduals);
         residualsUpToDate = true;
     }
 

@@ -1,0 +1,36 @@
+# Freestream.
+T_INF = 4439.0
+P_INF = 2766.5
+U_INF = 11373.0
+MASS_FRAC = {N2=0.74267, O2=0.00041612, N=0.021279, O=0.22892, NO=0.0066703, 'N2+'=3.9051e-09, 'O2+'=7.6333e-09, 'N+'=1.5267e-09, 'O+'=3.7468e-08, 'NO+'=3.8727e-05, 'e-'=7.096e-10}
+
+# Geometry.
+RADIUS = 0.02
+DOMAIN = 0.0038
+AXISYMMETRIC = false   
+
+# Models.
+GAS_MODEL = "air-11sp.gas"
+CHEM_MODEL = "air-11sp.chem"
+EXCHANGE_MODEL = "air-11sp.kin"
+
+# Grid.
+CELLS = 500
+CLUSTERING = 1.2 
+
+# Wall.
+T_WALL = 300.0
+VISCOSITY = true  
+LEWIS_NUM = 1.0
+SENSOR = false
+
+# Time stepping.
+MAX_ITERS = 0.3e6
+CFL_c = 0.1
+CFL_d = 0.1
+LTS = true
+
+# Output.  
+SAVE = "12A.dat" 
+PLOT = true
+VERBOSE = true

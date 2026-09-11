@@ -1,0 +1,19 @@
+-- These are too be appended to the prepped .kin file.
+-- They are obviously not real or physical as Millikan-White is only valid for diatomics.
+-- A 'hack' to try and drain some of the saturated e_ve mode since we don't have radiation.
+
+mechanism[9] = {
+  type = 'V-T',
+  p = 'H', q = 'H',
+  mode_p = 0,
+  rate = 'Landau-Teller',
+  relaxation_time = {model='Millikan-White', a=9.673, b=0.072500}
+}
+
+mechanism[10] = {
+  type = 'V-T',
+  p = 'H', q = 'He',
+  mode_p = 0,
+  rate = 'Landau-Teller',
+  relaxation_time = {model='Millikan-White', a=12.23, b=0.072500}
+}

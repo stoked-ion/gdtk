@@ -1,0 +1,61 @@
+\documentclass[10pt,a4paper]{article}
+
+\usepackage{lmodern}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage[margin=1in]{geometry}
+\usepackage{booktabs}
+\usepackage{longtable}
+\usepackage{array}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage[most]{tcolorbox}
+\usepackage{microtype}
+\usepackage[hidelinks]{hyperref}
+\usepackage{parskip}
+
+\title{STRATOS: Installation Guide}
+\author{\textit{Taine J. Rossini}}
+\date{Version 1.0.0.}
+
+\begin{document}
+\maketitle
+
+\section{}
+
+The following paths are used in the \texttt{makefile}, if yours are different, please edit the \texttt{makefile} accordingly. It is assumed that the user has already appended the \texttt{.bashrc} file according to the instructions in the \texttt{gdtk} installation guide.
+
+\begin{verbatim}
+    INSTALL_DIR ?= $(DGD)
+    MAIN_DIR := $(DGD_REPO)
+\end{verbatim}
+
+\section{}
+
+It is recommended to clean the \texttt{gdtk/src/gas} library before building.
+
+\begin{verbatim}
+    cd $DGD_REPO/src/gas
+    make clean
+\end{verbatim}
+
+\section{}
+
+\texttt{stratos} can then be built and installed by running the following commands,
+
+\begin{verbatim}
+    cd $DGD_REPO/examples/stratos
+    make install
+\end{verbatim}
+
+\section{}
+
+The local \texttt{Python} environment also requires installation of some packages. On \texttt{Linux} this can be performed using the following commands,
+
+\begin{verbatim}
+    python3 -m venv .venv
+    source .venv/bin/activate
+    pip install numpy scipy cffi matplotlib
+\end{verbatim}
+
+\end{document}

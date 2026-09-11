@@ -47,7 +47,7 @@ public:
         // two_temperature_air convention); without this the mode-name array is empty
         // and ConservedQuantitiesIndices indexes out of bounds.
         _energy_mode_names.length = 1;
-        _energy_mode_names[0] = "vibroelectronic";
+        _energy_mode_names[0] = "electronic";
         _species_names.length = 3;
         _species_names[Species.Ar] = "Ar";
         _species_names[Species.Ar_plus] = "Ar+";

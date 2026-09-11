@@ -1,0 +1,2 @@
+model = "ThermallyPerfectGas"
+species = {'H2', 'H', 'He', }

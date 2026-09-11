@@ -1,0 +1,33 @@
+# Comparison case taken from:
+# Ilich, Grossir, & Chazot (2017), "Evaluation of the Stagnation-Point Velocity Gradient in Low-Enthalpy Hypersonic Flows"
+# AIAA Paper 2017-3984, DOI: 10.2514/6.2017-3984
+
+# Freestream.
+T_INF = 53.0
+P_INF = 230.0
+U_INF = 1670.0
+MASS_FRAC = {N2 = 1}
+
+# Geometry.
+RADIUS = 0.0127
+DOMAIN = 0.002
+AXISYMMETRIC = true
+
+# Models.
+GAS_MODEL = "n2-therm-perf.gas"
+
+# Grid.
+CELLS = 500
+
+# Wall.
+T_WALL = 300.0
+VISCOSITY = true
+
+# Time stepping.
+T_END = {steady = 1e-1}
+LTS = true
+
+# Output.
+SAVE = "ilich.dat"
+PLOT = true
+VERBOSE = true

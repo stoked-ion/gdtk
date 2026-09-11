@@ -8,7 +8,7 @@ print("Block against diaphragm:", upstreamBlk)
 blk = infoFluidBlock(upstreamBlk)
 pRupture = 2*3.45e3
 
-function atTimestepStart(sim_time, steps, dt)
+function atTimestepStart(tab)
    if is_master_task then
       -- We are in the shock tube and can see the pressure wave arrive
       -- at the upstream-side of the diaphragm.
@@ -17,7 +17,7 @@ function atTimestepStart(sim_time, steps, dt)
       local ruptureFlag = userPad[1]
       if ruptureFlag < 1 and testCell.p > pRupture then
          ruptureFlag = 1
-         print("-- Diaphragm rupture at t=", sim_time)
+         print("-- Diaphragm rupture at t=", tab.time)
          print("-- pressure=", testCell.p)
       end
       userPad[1] = ruptureFlag

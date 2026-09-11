@@ -4,7 +4,8 @@
 --
 dofile('sim-config.lua')
 
-function atTimestepStart(sim_time, steps, dt)
+function atTimestepStart(tab)
+   local dt = tab.timeStep
    -- Unpack current piston state.
    local x = userPad[1]
    local xdot = userPad[2]

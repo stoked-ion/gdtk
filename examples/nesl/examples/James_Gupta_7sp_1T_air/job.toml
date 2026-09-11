@@ -1,0 +1,31 @@
+# Freestream.
+T_INF = 3111.4
+P_INF = 12726.0
+U_INF = 8600.4
+MASS_FRAC = {N2 = 0.767, O2 = 0.233}
+
+# Geometry.
+RADIUS = 0.008
+DOMAIN = 0.0005
+AXISYMMETRIC = true
+
+# Models.
+GAS_MODEL = "air-7sp.gas"
+CHEM_MODEL = "air-7sp.chem"
+
+# Grid.
+CELLS = 200
+
+# Wall.
+T_WALL = 300.0
+VISCOSITY = true
+LEWIS_NUM = 1.4
+
+# Time stepping.
+T_END = {steady = 1e-2}
+LTS = true
+
+# Output.
+SAVE = "james.dat"
+PLOT = true
+VERBOSE = true

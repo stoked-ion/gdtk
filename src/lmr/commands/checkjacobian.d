@@ -154,23 +154,34 @@ int main(string[] args)
         phase.readValuesFromJSON(jsonData[key]);
     }
     activePhase = nkPhases[$-1]; // set to the last phase from the simulation
-    if (readFrozenShockDetectorValues) readShockDetectorValues(); // we have to set the frozen shock detector flags before the residual evaluation below
-    evalResidualWorker(0); // we perform a residual evaluation here to populate the ghost-cells
+
     alias cfg = GlobalConfig;
     size_t nConserved = cfg.cqi.n;
+
+    // Set frozen shock-detector flags if requested; the corresponding shock-detector values were already loaded from the snapshot flow solution
+    cfg.frozen_shock_detector = readFrozenShockDetectorValues;
+    activePhase.frozenShockDetector = readFrozenShockDetectorValues;
+
+    // read in limiter values if requested
+    if (readFrozenLimiterValues) { readLimiterValues(snapshot); }
+    cfg.frozen_limiter = readFrozenLimiterValues;
+    activePhase.frozenLimiterForJacobian = readFrozenLimiterValues;
+    activePhase.frozenLimiterForResidual = readFrozenLimiterValues;
+
+    // Perform a residual evaluation to populate the ghost cells. This must occur after the frozen shock-detector flags are set.
+    evalResidualWorker(0);
 
     if (verbosity > 1) writefln("%s: Performing check with Jacobian perturbation parameter %.4e and Frechet perturbation parameter %.4e",
                                 cmdName, nkCfg.preconditionerPerturbation, nkCfg.frechetDerivativePerturbation);
 
     // prepare fluidblock (note that this program only operates on a single fluidblock)
     auto blk = localFluidBlocks[0];
-    if (readFrozenLimiterValues) readLimiterValues(snapshot);
 
     /*
      * 1. Do calculation of sparse-matrix Jacobian by test vector.
      */
     // 1a. Populate Jacobian
-    blk.initialize_jacobian(cfg.interpolation_order, nkCfg.preconditionerPerturbation, 0);
+    blk.initialize_jacobian(cfg.interpolation_order, nkCfg.preconditionerPerturbation, 0, !readFrozenLimiterValues);
     blk.evaluate_jacobian(nkCfg.fluxCalculatorForPreconditioner);
     // 1b. Prepare a test vector
     double[] testVec;
@@ -300,18 +311,4 @@ void readLimiterValues(int snapshot)
             }
         }
     }
-    cfg.frozen_limiter = true;
-    activePhase.frozenLimiterForJacobian = true;
-    activePhase.frozenLimiterForResidual = true;
-}
-
-void readShockDetectorValues()
-{
-    /*
-    Note that the frozen shock detector values have already been read in as part of the snapshot flow solution.
-    We just need to set the frozen shock detector flags.
-    */
-    alias cfg = GlobalConfig;
-    cfg.frozen_shock_detector = true;
-    activePhase.frozenShockDetector = true;
 }

@@ -144,10 +144,15 @@ void synchronize_corner_coords_for_all_blocks()
     }
 } // end synchronize_corner_coords_for_all_blocks()
 
-void call_UDF_at_timestep_start()
+enum AtStartFnName : string {
+    at_timestep_start = "atTimestepStart",
+    at_iteration_start = "atIterationStart"
+}
+
+void call_UDF_at_iteration_start(AtStartFnName fn_name)
 {
     auto L = GlobalConfig.master_lua_State;
-    lua_getglobal(L, "atTimestepStart");
+    lua_getglobal(L, toStringz(cast(string)fn_name));
     if (lua_isnil(L, -1)) {
         // There is no suitable Lua function.
         lua_pop(L, 1); // discard the nil item
@@ -155,24 +160,39 @@ void call_UDF_at_timestep_start()
         if (GlobalConfig.user_pad_length > 0) {
             push_array_to_Lua(L, GlobalConfig.userPad, "userPad");
         }
-        // Proceed to call the user's function.
-        lua_pushnumber(L, SimState.time);
-        lua_pushnumber(L, SimState.step);
-        lua_pushnumber(L, SimState.dt_global);
-        int number_args = 3;
+        // Set up table with arguments for caller
+        lua_newtable(L);
+        final switch (fn_name) {
+            case AtStartFnName.at_timestep_start:
+                lua_pushnumber(L, SimState.time); lua_setfield(L, -2, "time");
+                // add "simTime" as alias fro "time"
+                lua_pushnumber(L, SimState.time); lua_setfield(L, -2, "simTime");
+                lua_pushnumber(L, SimState.step); lua_setfield(L, -2, "step");
+                lua_pushnumber(L, SimState.dt_global); lua_setfield(L, -2, "timeStep");
+                break;
+            case AtStartFnName.at_iteration_start:
+                lua_pushnumber(L, NKSimState.step); lua_setfield(L, -2, "step");
+                lua_pushnumber(L, NKSimState.phase); lua_setfield(L, -2, "phase");
+                lua_pushnumber(L, NKSimState.cfl); lua_setfield(L, -2, "cfl");
+                break;
+        }
+        // Proceed to call the user's function
+        int number_args = 1;
         int number_results = 0;
         if ( lua_pcall(L, number_args, number_results, 0) != 0 ) {
-            string errMsg = "ERROR: while running user-defined function atTimestepStart()\n";
+            string errMsg = format("ERROR: while running user-defined function %s()\n", cast(string)fn_name);
             errMsg ~= to!string(lua_tostring(L, -1));
             throw new FlowSolverException(errMsg);
         }
-        lua_getglobal(L, "dt_override");
-        if (lua_isnumber(L, -1)) {
-            SimState.dt_override = to!double(lua_tonumber(L, -1));
-        } else {
-            SimState.dt_override = 0.0;
+        if (fn_name == AtStartFnName.at_timestep_start) {
+            lua_getglobal(L, "dt_override");
+            if (lua_isnumber(L, -1)) {
+                SimState.dt_override = to!double(lua_tonumber(L, -1));
+            } else {
+                SimState.dt_override = 0.0;
+            }
+            lua_pop(L, 1); // dispose dt_override item
         }
-        lua_pop(L, 1); // dispose dt_override item
         //
         if (GlobalConfig.user_pad_length > 0) {
             fill_array_from_Lua(L, GlobalConfig.userPad, "userPad");
@@ -183,7 +203,7 @@ void call_UDF_at_timestep_start()
         broadcast_master_userPad();
         copy_userPad_into_block_interpreters();
     }
-} // end call_UDF_at_timestep_start()
+} // end call_UDF_at_iteration_start()
 
 void broadcast_master_userPad()
 {

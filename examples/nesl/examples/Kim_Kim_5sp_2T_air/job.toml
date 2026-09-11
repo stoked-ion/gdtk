@@ -1,0 +1,38 @@
+# Baseline comparison case taken from:
+# Kim and Jo (2021) "Modification of chemical-kinetic parameters for 11-air species in re-entry flows"
+# Int. J. Heat Mass Transfer, Vol. 169, DOI: 10.1016/j.ijheatmasstransfer.2021.120950
+
+# Freestream.
+T_INF = 243.0
+P_INF = 17.7
+U_INF = 7652
+MASS_FRAC = {N2 = 0.767, O2 = 0.233}
+
+# Geometry.
+RADIUS = 0.1524
+DOMAIN = 0.011
+AXISYMMETRIC = true
+
+# Models.
+GAS_MODEL = "air-5sp.gas"
+CHEM_MODEL = "air-5sp.chem"
+EXCHANGE_MODEL = "air-5sp.kin"
+
+# Grid.
+CELLS = 300
+CLUSTERING = 1.01
+
+# Wall.
+T_WALL = 1000.0
+VISCOSITY = true
+
+# Time stepping.
+T_END = {steady = 1e-1}
+CFL_c = 0.1
+CFL_d = 0.1
+LTS = true
+
+# Output.
+SAVE = "kim.dat"
+PLOT = true
+VERBOSE = true

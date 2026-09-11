@@ -1,0 +1,376 @@
+\documentclass[10pt,a4paper]{article}
+
+% Standard packages.
+\usepackage{lmodern}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage[margin=1in]{geometry}
+\usepackage{booktabs}
+\usepackage{longtable}
+\usepackage{array}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage[most]{tcolorbox}
+\usepackage{microtype}
+\usepackage[hidelinks]{hyperref}
+\usepackage{parskip}
+
+% Define some colours, got from eye dropper on the user guide for SLF.
+\definecolor{shadecolor}{RGB}{248,248,248}
+\definecolor{codekey}{RGB}{5,41,125}
+\definecolor{codestring}{RGB}{64,112,160}
+\definecolor{codecomment}{RGB}{97,161,176}
+\definecolor{codebool}{RGB}{0,112,33}
+
+% Stop -- turning into en-dash in plain text, for CLI commands.
+\DisableLigatures[-]{encoding = T1, family = tt*}
+
+% Allows underscores to override line breaks in longtable.
+\let\origunderscore\_
+\renewcommand{\_}{\origunderscore\penalty4000\relax}
+\newcolumntype{L}[1]{>{\raggedright\arraybackslash}p{#1}}
+
+% Loosen tolerance for line breaking.
+\tolerance=1200
+\setlength{\emergencystretch}{3em}
+
+% Settings to make code blocks look like Python.
+\lstdefinestyle{py}{
+    basicstyle=\ttfamily\small,
+    commentstyle=\color{codecomment}\itshape,
+    morecomment=[l]{\#},
+    morestring=[b]",
+    morestring=[b]',
+    stringstyle=\color{codestring},
+    alsoletter={_},
+    emph={Stratos, normal, oblique, shock_angle,
+    interpolate_to_length, gasFile, chemFile, kinFile,
+    x_end, cells, u1, massf1, T1, p1, rho1, theta, beta,
+    verbose, end_type, max_iter, tol, no_cells,
+    target_length, columns, reference},
+    emphstyle={\color{codekey}},
+    emph=[2]{True,False},
+    emphstyle=[2]{\color{codebool}\bfseries},
+    frame=none,
+    showstringspaces=false,
+    columns=fullflexible,
+    keepspaces=true,
+    breaklines=true,
+}
+\lstdefinestyle{plain}{
+    basicstyle=\ttfamily\small,
+    emph={},
+    emph=[2]{},
+    frame=none,
+    columns=fullflexible,
+    keepspaces=true,
+    breaklines=true,
+}
+\lstset{style=py}
+
+% Put a shaded box around listings.
+\tcolorboxenvironment{lstlisting}{
+    breakable,
+    colback=shadecolor,
+    colframe=shadecolor,
+    boxrule=0pt,
+    arc=4pt, outer arc=4pt,
+    boxsep=0pt,
+    left=6pt, right=6pt, top=6pt, bottom=6pt,
+    grow to left by=6pt, grow to right by=6pt,
+    before skip=8pt, after skip=8pt,
+}
+
+%+++++++++++++++++++++++++++++++++++++++++++++
+%             Preamble ends here
+%+++++++++++++++++++++++++++++++++++++++++++++
+
+\title{STRATOS: Reference Manual}
+\author{\textit{Taine J. Rossini}}
+\date{Version 1.0.0.}
+
+\begin{document}
+\maketitle
+
+\section*{Abstract}
+
+This document lists every argument recognised by \texttt{stratos}, the post-shock relaxation solver, and the returned data.
+
+\section*{Usage}
+
+Stratos has no command line interface. It is a single class, imported into a job script.
+
+\begin{lstlisting}
+from stratos import Stratos
+
+st = Stratos('air-5sp.gas', 'air-5sp.chem', '', 0.1, 1000, 6075.1,
+             {"N2": 0.767, "O2": 0.233}, 365.5, rho1=0.02322)
+
+columns = st.normal()
+\end{lstlisting}
+
+A run has three parts.
+
+\begin{itemize}
+    \item Construct a \texttt{Stratos} object from the gas-models, domain, and pre-shock freestream.
+    \item Call one solution method, \texttt{normal()}, \texttt{oblique()} or \texttt{shock\_angle()}, to march along the streamline.
+    \item Use the returned dictionary. Nothing is written to disk and nothing is plotted; every method hands back a dictionary of equal-length numpy arrays for the script to do with as it likes.
+\end{itemize}
+
+One object can be used for as many runs as needed. The freestream is fixed at construction, so a sweep over shock angles is a loop over the method, not over the constructor.
+
+\section*{Constructor arguments}
+
+The arguments are positional, in this order, and none of the first eight has a default.
+
+\begin{longtable}{@{}lL{22mm}L{102mm}@{}}
+    \toprule
+    \textbf{Argument} & \textbf{Type} & \textbf{Description} \\
+    \midrule
+    \endfirsthead
+    \toprule
+    \textbf{Argument} & \textbf{Type} & \textbf{Description} \\
+    \midrule
+    \endhead
+    \bottomrule
+    \endfoot
+    \endlastfoot
+    \texttt{gasFile} & string & Path to the gas-model file. \\
+    \addlinespace
+    \texttt{chemFile} & string & Path to the reaction file. \\
+    \addlinespace
+    \texttt{kinFile} & string & Path to the energy-exchange file, for two-temperature runs. Pass \texttt{""} on a one-temperature gas-model. \\
+    \addlinespace
+    \texttt{x\_end} & float & Length of the marching domain, m. \\
+    \addlinespace
+    \texttt{cells} & int & Number of points the domain is divided into. \\
+    \addlinespace
+    \texttt{u1} & float & Freestream velocity, m/s. \\
+    \addlinespace
+    \texttt{massf1} & dict or list & Freestream mass fractions. A dictionary is keyed by species name. \\
+    \addlinespace
+    \texttt{T1} & float & Freestream temperature, K. \\
+    \bottomrule
+\end{longtable}
+
+In addition, exactly one of \texttt{p1} or \texttt{rho1} must be supplied as a keyword.
+
+\begin{center}
+	\begin{tabular}{@{}lllL{88mm}@{}}
+	\toprule
+	\textbf{Argument} & \textbf{Type} & \textbf{Default} & \textbf{Description} \\
+	\midrule
+	\texttt{p1} & float & \texttt{None} & Freestream pressure, Pa. \\
+	\addlinespace
+	\texttt{rho1} & float & \texttt{None} & Freestream density, kg/m$^3$. \\
+	\bottomrule
+	\end{tabular}
+\end{center}
+
+If both are given, \texttt{p1} is used. If neither is, the construction fails.
+
+\section*{Solution methods}
+
+\subsection*{\texttt{normal()}}
+
+Applies the normal-shock jump conditions to the freestream and marches from the immediate post-shock state to \texttt{x\_end}. Returns the column dictionary.
+
+\begin{lstlisting}
+columns = st.normal()
+\end{lstlisting}
+
+\subsection*{\texttt{oblique(theta)}}
+
+Solves the shock over a wedge of half-angle \texttt{theta}. The shock angle from the frozen relation is only a starting guess; a secant iteration adjusts it until the flow angle at the end of the domain matches the wedge. Returns a tuple of the column dictionary and the converged shock angle, in radians.
+
+\begin{longtable}{@{}lL{16mm}L{22mm}L{80mm}@{}}
+	\toprule
+	\textbf{Argument} & \textbf{Type} & \textbf{Default} & \textbf{Description} \\
+	\midrule
+	\endfirsthead
+	\toprule
+	\textbf{Argument} & \textbf{Type} & \textbf{Default} & \textbf{Description} \\
+	\midrule
+	\endhead
+	\bottomrule
+	\endfoot
+	\endlastfoot
+	\texttt{theta} & float & required & Wedge half-angle, radians. \\
+	\addlinespace
+	\texttt{verbose} & bool & \texttt{True} & Prints the residual, last flow angle and shock angle each iteration. \\
+	\addlinespace
+	\texttt{end\_type} & string & \texttt{'x\_arc'} & Which column \texttt{x\_end} is measured along, and which the result is interpolated onto. \\
+	\addlinespace
+	\texttt{max\_iter} & int & \texttt{30} & Maximum secant iterations for the shock angle iteration. \\
+	\addlinespace
+	\texttt{tol} & float & \texttt{1e-5} & Convergence tolerance on the flow angle, radians. \\
+	\bottomrule
+\end{longtable}
+
+\begin{lstlisting}
+columns, beta = st.oblique(np.deg2rad(15.0), verbose=False)
+\end{lstlisting}
+
+\subsection*{\texttt{shock\_angle(beta)}}
+
+Marches the streamline behind a shock of known angle \texttt{beta}, in radians. This is the method for tracing a shock whose shape is already known. Returns the column dictionary.
+
+\begin{lstlisting}
+columns = st.shock_angle(beta)
+\end{lstlisting}
+
+The tangential velocity is preserved across the shock and the normal component marched, so this and \texttt{oblique()} share their post-processing and return the same columns, less \texttt{x\_p}.
+
+\subsection*{\texttt{interpolate\_to\_length(no\_cells, target\_length, columns, reference)}}
+
+Interpolates a result onto an evenly spaced grid. It can be used to re-grid a result afterwards, for example onto residence time rather than distance.
+
+\begin{center}
+	\begin{tabular}{@{}lL{18mm}L{100mm}@{}}
+	\toprule
+	\textbf{Argument} & \textbf{Type} & \textbf{Description} \\
+	\midrule
+	\texttt{no\_cells} & int & Number of points in the new grid. \\
+	\addlinespace
+	\texttt{target\_length} & float & Upper limit of the new grid, in the units of \texttt{reference}. \\
+	\addlinespace
+	\texttt{columns} & dict & The dictionary to re-grid. Every column in it is interpolated. \\
+	\addlinespace
+	\texttt{reference} & string & The column that the new grid spans. \\
+	\bottomrule
+	\end{tabular}
+\end{center}
+
+\begin{lstlisting}
+st.interpolate_to_length(1000, 2e-7, columns, 't')
+\end{lstlisting}
+
+\section*{Returned data}
+\label{sec:returned}
+
+Every method returns a dictionary of numpy arrays, all \texttt{cells} long.
+
+\subsection*{From \texttt{normal()}}
+
+\begin{longtable}{@{}lL{22mm}L{102mm}@{}}
+	\toprule
+	\textbf{Key} & \textbf{Units} & \textbf{Description} \\
+	\midrule
+	\endfirsthead
+	\toprule
+	\textbf{Key} & \textbf{Units} & \textbf{Description} \\
+	\midrule
+	\endhead
+	\bottomrule
+	\endfoot
+	\endlastfoot
+	\texttt{x} & m & Distance behind the shock. \\
+	\addlinespace
+	\texttt{t} & s & Time behind the shock, integrated along the streamline. \\
+	\addlinespace
+	\texttt{u} & m/s & Velocity. \\
+	\addlinespace
+	\texttt{T\_tr} & K & Translational-rotational temperature. \\
+	\addlinespace
+	\texttt{T\_ve} & K & Vibro-electronic temperature. Two-temperature runs only. \\
+	\addlinespace
+	\texttt{p} & Pa & Pressure. \\
+	\addlinespace
+	\texttt{rho} & kg/m$^3$ & Density. \\
+	\addlinespace
+	\texttt{e\_tr} & J/kg & Translational-rotational internal energy. \\
+	\addlinespace
+	\texttt{e\_ve} & J/kg & Vibro-electronic internal energy. Two-temperature runs only. \\
+	\addlinespace
+	\texttt{gamma} & - & Ratio of specific heats. \\
+	\addlinespace
+	\texttt{R} & J/kg/K & Gas constant of the mixture. \\
+	\addlinespace
+	\texttt{Y\_<species>} & - & Mass fraction, one column per species. \\
+	\addlinespace
+	\texttt{X\_<species>} & - & Mole fraction, one column per species. \\
+	\bottomrule
+\end{longtable}
+
+On a one-temperature gas-model the two vibro-electronic columns are absent.
+
+\subsection*{From \texttt{oblique()} and \texttt{shock\_angle()}}
+
+Both carry every column above, except that \texttt{x} is removed in favour of the shock-aligned and Cartesian coordinates below, and \texttt{u} is redefined as the velocity magnitude.
+
+\begin{longtable}{@{}lL{22mm}L{102mm}@{}}
+	\toprule
+	\textbf{Key} & \textbf{Units} & \textbf{Description} \\
+	\midrule
+	\endfirsthead
+	\toprule
+	\textbf{Key} & \textbf{Units} & \textbf{Description} \\
+	\midrule
+	\endhead
+	\bottomrule
+	\endfoot
+	\endlastfoot
+	\texttt{x\_n} & m & Distance normal to the shock. \\
+	\addlinespace
+	\texttt{x\_t} & m & Distance tangential to the shock. \\
+	\addlinespace
+	\texttt{x\_arc} & m & Distance along the streamline, the default \texttt{end\_type}. \\
+	\addlinespace
+	\texttt{x\_coord} & m & Cartesian $x$, aligned with the freestream, with the origin where the streamline crosses the shock. \\
+	\addlinespace
+	\texttt{y\_coord} & m & Cartesian $y$, normal to the freestream. \\
+	\addlinespace
+	\texttt{x\_p} & m & Distance along the wedge surface. \texttt{oblique()} only. \\
+	\addlinespace
+	\texttt{u\_n} & m/s & Velocity normal to the shock, which is what is marched. \\
+	\addlinespace
+	\texttt{u\_t} & m/s & Velocity tangential to the shock, constant across it. \\
+	\addlinespace
+	\texttt{u} & m/s & Velocity magnitude, not the normal component. \\
+	\addlinespace
+	\texttt{flow\_angle} & rad & Angle of the streamline, measured from the freestream. \\
+	\bottomrule
+\end{longtable}
+
+\section*{A complete job script}
+
+A one-temperature normal shock, marched a metre downstream.
+
+\begin{lstlisting}
+# Load libraries.
+from stratos import Stratos
+import numpy as np
+
+# Construct the solver.
+st = Stratos('air-7sp.gas', 'air-7sp.chem', '', 1.0, 100000, 4273.64,
+             {"N2": 0.78, "O2": 0.22}, 300, 133.3)
+
+columns = st.normal()
+
+# Save the result to a CSV file.
+np.savetxt('profile.csv', np.column_stack(list(columns.values())),
+           delimiter=',', header=','.join(columns.keys()), comments='')
+\end{lstlisting}
+
+A sweep of wedge angles on the same object.
+
+\begin{lstlisting}
+# Load libraries.
+from stratos import Stratos
+import numpy as np
+
+# Construct the solver.
+st = Stratos('air-5sp.gas', 'air-5sp.chem', 'air-5sp.kin', 0.1, 1000, 6075.1,
+             {"N2": 0.767, "O2": 0.233}, 365.50, rho1=0.02322)
+
+results = {}
+
+for angle in [5, 10, 15, 20, 25, 30, 35, 40]:
+    results[angle], _ = st.oblique(np.deg2rad(angle), verbose=False)
+
+# Print the results at the end of the domain.
+for angle, columns in results.items():
+    print(angle, columns['T_tr'][-1])
+\end{lstlisting}
+
+\end{document}

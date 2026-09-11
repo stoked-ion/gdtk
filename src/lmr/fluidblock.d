@@ -129,6 +129,7 @@ public:
     double dtMin;
     double omegaLocal;
     FlowState* fs_save;
+    FlowState* ghost_fs_save;
 
     // storage for a precondition matrix
     FlowJacobian flowJacobian;
@@ -198,6 +199,7 @@ public:
         }
         version(newton_krylov) {
             fs_save = new FlowState(dedicatedConfig[id].gmodel, dedicatedConfig[id].turb_model.nturb);
+            ghost_fs_save = new FlowState(dedicatedConfig[id].gmodel, dedicatedConfig[id].turb_model.nturb);
         }
     }
 
@@ -1294,7 +1296,7 @@ public:
 
     version(newton_krylov) {
 
-    void initialize_jacobian(int spatial_order_of_jacobian, double sigma, int iluFill=-1)
+    void initialize_jacobian(int spatial_order_of_jacobian, double sigma, int iluFill = -1, bool include_limiter_dependencies = false)
     {
         /*
           This method initializes the flow Jacobian matrix attached the FluidBlock object.
@@ -1307,6 +1309,7 @@ public:
         GasModel gmodel = cast(GasModel) myConfig.gmodel;
         if (gmodel is null) { gmodel = GlobalConfig.gmodel_master; }
         fs_save = new FlowState(gmodel, myConfig.turb_model.nturb);
+        ghost_fs_save = new FlowState(gmodel, myConfig.turb_model.nturb);
 
         // gather the expected number of non-zero entries in the flow Jacobian
         foreach (cell; cells) {
@@ -1314,7 +1317,7 @@ public:
                 cell.cell_list ~= cell; 
             }
             else {
-                cell.gather_residual_stencil_lists(spatial_order_of_jacobian);
+                cell.gather_residual_stencil_lists(spatial_order_of_jacobian, include_limiter_dependencies);
             }
             nentry += cell.cell_list.length;
         }
@@ -1338,7 +1341,7 @@ public:
                     cell = face.right_cell;
                     ghost_cell = face.left_cell;
                 }
-                ghost_cell.gather_residual_stencil_lists_for_ghost_cells(spatial_order_of_jacobian, cell.cell_cloud);
+                ghost_cell.gather_residual_stencil_lists_for_ghost_cells(spatial_order_of_jacobian, cell.cell_cloud, include_limiter_dependencies);
             }
         }
 
@@ -1590,6 +1593,11 @@ public:
 
             // return cell to original state
             version(complex_numbers) {
+                bool use_state_restore_cleanup = true;
+            } else {
+                bool use_state_restore_cleanup = (grid_type == Grid_t.unstructured_grid);
+            }
+            if (use_state_restore_cleanup) {
                 pcell.U[ftl].copy_values_from(pcell.U[0]);
                 pcell.fs.copy_values_from(*fs_save);
                 if (myConfig.viscous) {
@@ -1602,7 +1610,7 @@ public:
             } else {
                 // TODO: for structured grids employing a real-valued low-order numerical Jacobian as
                 // the precondition matrix the above code doesn't completely clean up the effect of the
-                // perturbuation. Note that this does not occur for unstructured grids.
+                // perturbation. Note that this does not occur for unstructured grids.
                 // This is currently under investigation, in the interim we will apply the more costly
                 // method of re-evaluating evalRHS with the unperturbed conserved state. KAD 2023-08-31
                 pcell.U[ftl].copy_values_from(pcell.U[0]);
@@ -1653,6 +1661,8 @@ public:
                 } else {
                     ghost_cell = bface.left_cell;
                 }
+                // save a copy of the flowstate
+                ghost_fs_save.copy_values_from(*(ghost_cell.fs));
 
                 // loop through each interior cell which contains the ghost cell in its stencil
                 foreach (pcell; ghost_cell.cell_list) {
@@ -1700,14 +1710,19 @@ public:
 
                         // return cell to original state
                         version(complex_numbers) {
+                            bool use_state_restore_cleanup = true;
+                        } else {
+                            bool use_state_restore_cleanup = (grid_type == Grid_t.unstructured_grid);
+                        }
+                        if (use_state_restore_cleanup) {
+                            ghost_cell.fs.copy_values_from(*ghost_fs_save);
                             if (myConfig.viscous) {
                                 foreach (cell; ghost_cell.cell_list) { cell.grad.copy_values_from(*(cell.grad_save)); }
                             }
                             if (flowJacobian.spatial_order >= 2) {
                                 foreach(cell; ghost_cell.cell_list) { cell.gradients.copy_values_from(*(cell.gradients_save)); }
                             }
-                            ghost_cell.fs.clear_imaginary_components();
-                            estimate_turbulence_viscosity(pcell.cell_list); // TODO: I think maybe this should be ghost_cell.cell_list
+                            estimate_turbulence_viscosity(ghost_cell.cell_list);
                         } else {
                             // TODO: for structured grids employing a real-valued low-order numerical Jacobian as
                             // the precondition matrix the above code doesn't completely clean up the effect of the

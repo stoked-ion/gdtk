@@ -56,7 +56,7 @@ def test_run():
     assert proc.returncode == 0, "Failed during: " + cmd
     tolerance_on_cfl_check = 0.01
     expected_reason_for_stop = "relative-global-residual-target"
-    expected_number_steps = 340
+    expected_number_steps = 335
     expected_final_cfl = 1.000e+06
     reason = ""
     steps = 0
@@ -74,8 +74,24 @@ def test_run():
     assert abs(cfl - expected_final_cfl)/expected_final_cfl < tolerance_on_cfl_check, \
         "Failed to arrive at expected CFL value on final step."
 
-def test_check_jacobian():
+def test_check_jacobian_with_frozen_limiter_and_shock_detector():
     cmd = "lmrZ-check-jacobian --read-frozen-limiter-values=true --read-frozen-shock-detector-values=true --output=norms.dat"
+    proc = subprocess.run(cmd.split(), capture_output=True, text=True)
+    assert proc.returncode == 0, "Failed during: " + cmd
+    tolerance_on_norm_check = 1.0e-14
+    norm0 = 0.0
+    norm1 = 0.0
+    lines = proc.stdout.split("\n")
+    for line in lines:
+        if line.find("c0, 2-norm") != -1:
+            norm0 = float(line.split()[2])
+        if line.find("c1, 2-norm") != -1:
+            norm1 = float(line.split()[2])
+    assert abs((norm0 - norm1)/norm0) < tolerance_on_norm_check, \
+        "Failed to compute consistent (Jacobian) matrix-vector multiplication effect."
+
+def test_check_jacobian_without_frozen_limiter_and_shock_detector():
+    cmd = "lmrZ-check-jacobian --read-frozen-limiter-values=false --read-frozen-shock-detector-values=false --output=norms.dat"
     proc = subprocess.run(cmd.split(), capture_output=True, text=True)
     assert proc.returncode == 0, "Failed during: " + cmd
     tolerance_on_norm_check = 1.0e-14

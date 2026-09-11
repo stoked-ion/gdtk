@@ -1,0 +1,33 @@
+# Freestream.
+T_INF = 432.93
+P_INF = 61.05
+U_INF = 19239.83
+MASS_FRAC = {H2 = 0.335, He = 0.665}
+
+# Geometry.
+RADIUS = 0.02
+DOMAIN = 0.01
+AXISYMMETRIC = false
+
+# Models.
+GAS_MODEL = "gas-giant-2T-6sp-mt.gas"
+CHEM_MODEL = "gas-giant-2T-6sp.chem"
+EXCHANGE_MODEL = "gas-giant-2T-6sp.kin"
+T_FROZEN = 1000.0
+
+# Grid.
+CELLS = 70
+
+# Wall.
+T_WALL = 300.0
+VISCOSITY = true
+SENSOR = false
+
+# Time stepping.
+T_END = {steady = 1e-2}
+CFL_d = 0.01
+
+# Output.
+SAVE = "joslyn.dat"
+PLOT = true
+VERBOSE = true

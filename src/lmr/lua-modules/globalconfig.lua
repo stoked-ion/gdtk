@@ -39,6 +39,7 @@ configOptionsHidden = { -- hidden from user
    applied_B_ramp = 0.0,
    applied_B_x0 = 0.0,
    applied_B_x1 = 0.0,
+   applied_B_table = "",
    electric_field_gmres_iters = -1,
    electric_field_freeze_in_linear_solve = false,
    electric_field_start_step = 0,

@@ -216,8 +216,10 @@ class ElectricField {
         // The NOMINAL field decides whether the Hall machinery runs at all; the LOCAL
         // field (appliedBzAt) is what enters the physics, so a tapered magnet gives
         // beta -> 0 outside it. With applied_B_ramp = 0 the two are identical everywhere
-        // and this is exactly the pre-existing path.
-        double Bz_nom = GlobalConfig.applied_Bz;
+        // and this is exactly the pre-existing path. appliedBzNominal() (not
+        // config.applied_Bz) because a TABULATED profile leaves applied_Bz at zero,
+        // which would silently disable Hall.
+        double Bz_nom = appliedBzNominal();
         bool hall_on = GlobalConfig.electric_field_hall_effect && (Bz_nom != 0.0);
 
         if (sigmaH_cell.length != N) sigmaH_cell.length = N;
@@ -552,7 +554,7 @@ class ElectricField {
                     throw new Error(errMsg);
                 }
 
-                double Bz_nom = GlobalConfig.applied_Bz;
+                double Bz_nom = appliedBzNominal();
                 bool hall_on = GlobalConfig.electric_field_hall_effect && (Bz_nom != 0.0);
 
                 // ---------------------------------------------------------------------
@@ -1522,7 +1524,7 @@ class ElectricField {
                 // current computed from it) would disagree with the operator that
                 // produced phi. `central` is left exactly as it was.
                 if (!hall_scheme_central && insulator_emf && wall_io >= 0
-                    && GlobalConfig.applied_Bz != 0.0) {
+                    && appliedBzNominal() != 0.0) {
                     auto wface = cell.iface[wall_io];
                     double Bz_e = appliedBzAt(wface.pos.x.re);
                     double wsign = cell.outsign[wall_io];
@@ -1553,7 +1555,7 @@ class ElectricField {
         // Hall device, whose thickness scales like the channel height over beta -- shows
         // up here as a max hugely larger than the bulk V/H scale, long before it shows up
         // as a crash in the flow solver downstream. Reported for the first few solves.
-        if (hall_phi_reports <= 4 && GlobalConfig.applied_Bz != 0.0) {
+        if (hall_phi_reports <= 4 && appliedBzNominal() != 0.0) {
             double emax = 0.0, ex_at = 0.0, ey_at = 0.0, exv = 0.0, eyv = 0.0;
             foreach(blkid, block; localFluidBlocks){
                 foreach(cell; block.cells){

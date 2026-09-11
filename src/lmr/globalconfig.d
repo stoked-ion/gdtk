@@ -1233,6 +1233,20 @@ final class GlobalConfig {
     shared static double applied_B_ramp = 0.0;  // 0 => uniform, as before
     shared static double applied_B_x0 = 0.0;    // upstream edge of the magnet
     shared static double applied_B_x1 = 0.0;    // downstream edge
+    // TABULATED axial field, from a magnetostatic solution (e.g. FEMM) rather than the
+    // tanh idealisation. The tanh window is single-humped, y-uniform and strictly
+    // positive; a real magnet assembly is none of those. Measured on the X2 64 mm-gap
+    // design: TWO magnets with a dip between them, a peak 28% below the nominal, and a
+    // return-flux lobe of about -0.08 T outside that never decays to zero. Points are
+    // (x [m], B [T]), strictly increasing in x; linear interpolation between them and
+    // clamped to the end values outside. Set applied_B_table (a CSV path) to use it; it
+    // TAKES PRECEDENCE over applied_B_ramp, and leaving it unset takes exactly the
+    // pre-existing code path.
+    enum int APPLIED_B_TAB_MAX = 8192;
+    shared static double[APPLIED_B_TAB_MAX] applied_B_tab_x;
+    shared static double[APPLIED_B_TAB_MAX] applied_B_tab_B;
+    shared static int applied_B_tab_n = 0;
+    shared static string applied_B_table = "";
     shared static int electric_field_gmres_iters = -1;
     // Freeze the solved field through the Newton-Krylov linear solve: solve it at the
     // base residual (ftl==0) and reuse it for the Frechet/Jacobian-vector evaluations
@@ -2115,6 +2129,8 @@ void set_config_for_core(JSONValue jsonData)
     mixin(update_double("applied_B_ramp", "applied_B_ramp"));
     mixin(update_double("applied_B_x0", "applied_B_x0"));
     mixin(update_double("applied_B_x1", "applied_B_x1"));
+    mixin(update_string("applied_B_table", "applied_B_table"));
+    loadAppliedBTable();
     mixin(update_int("electric_field_gmres_iters", "electric_field_gmres_iters"));
     mixin(update_bool("electric_field_freeze_in_linear_solve", "electric_field_freeze_in_linear_solve"));
     mixin(update_int("electric_field_start_step", "electric_field_start_step"));
@@ -2908,8 +2924,89 @@ void registerGlobalConfig(lua_State* L)
 @nogc
 double appliedBzAt(double x)
 {
+    // Tabulated profile wins when present.
+    int n = GlobalConfig.applied_B_tab_n;
+    if (n > 0) {
+        auto xs = cast(double[])GlobalConfig.applied_B_tab_x[0 .. n];
+        auto bs = cast(double[])GlobalConfig.applied_B_tab_B[0 .. n];
+        if (x <= xs[0]) return bs[0];
+        if (x >= xs[n-1]) return bs[n-1];
+        // binary search for the bracketing interval
+        int lo = 0, hi = n - 1;
+        while (hi - lo > 1) {
+            int mid = (lo + hi)/2;
+            if (xs[mid] <= x) lo = mid; else hi = mid;
+        }
+        double dx = xs[hi] - xs[lo];
+        if (dx <= 0.0) return bs[lo];
+        double w = (x - xs[lo])/dx;
+        return bs[lo]*(1.0 - w) + bs[hi]*w;
+    }
     double L = GlobalConfig.applied_B_ramp;
     if (L <= 0.0) return GlobalConfig.applied_Bz;
     return GlobalConfig.applied_Bz*0.5*(tanh((x - GlobalConfig.applied_B_x0)/L)
                                       + tanh((GlobalConfig.applied_B_x1 - x)/L));
+}
+
+/**
+ * The NOMINAL applied field: the scale used to decide whether the Hall machinery runs
+ * at all, as opposed to appliedBzAt(x) which is the LOCAL value entering the physics.
+ *
+ * With a tabulated profile config.applied_Bz is left at zero, so testing that directly
+ * would silently switch the Hall effect off and produce a plausible but wrong answer.
+ * Return the largest |B| in the table instead.
+ */
+@nogc
+double appliedBzNominal()
+{
+    int n = GlobalConfig.applied_B_tab_n;
+    if (n <= 0) return GlobalConfig.applied_Bz;
+    auto bs = cast(double[])GlobalConfig.applied_B_tab_B[0 .. n];
+    double m = 0.0;
+    foreach (b; bs) { double a = (b < 0.0) ? -b : b; if (a > m) m = a; }
+    return m;
+}
+
+/**
+ * Read the tabulated axial field named by config.applied_B_table.
+ *
+ * Format: one "x,B" pair per line, x in metres and B in tesla, strictly increasing in x.
+ * Blank lines and lines beginning with '#' are ignored, as is a single non-numeric header
+ * line, so a CSV exported straight from a magnetostatic solver can be used unedited.
+ */
+void loadAppliedBTable()
+{
+    import std.stdio: File;
+    import std.string: strip, split, startsWith;
+    import std.conv: to;
+    import std.file: exists;
+    GlobalConfig.applied_B_tab_n = 0;
+    string fname = GlobalConfig.applied_B_table;
+    if (fname.length == 0) return;
+    if (!exists(fname)) {
+        throw new Error("applied_B_table file not found: " ~ fname);
+    }
+    int n = 0;
+    double xprev = -double.infinity;
+    foreach (line; File(fname, "r").byLine()) {
+        auto t = strip(line.idup);
+        if (t.length == 0 || t.startsWith("#")) continue;
+        auto parts = split(t, ",");
+        if (parts.length < 2) continue;
+        double xv, bv;
+        try { xv = to!double(strip(parts[0])); bv = to!double(strip(parts[1])); }
+        catch (Exception e) { continue; }   // header line
+        if (n >= GlobalConfig.APPLIED_B_TAB_MAX) {
+            throw new Error("applied_B_table has too many points; raise APPLIED_B_TAB_MAX");
+        }
+        if (xv <= xprev) {
+            throw new Error("applied_B_table must be strictly increasing in x: " ~ fname);
+        }
+        xprev = xv;
+        GlobalConfig.applied_B_tab_x[n] = xv;
+        GlobalConfig.applied_B_tab_B[n] = bv;
+        n++;
+    }
+    if (n < 2) throw new Error("applied_B_table needs at least two points: " ~ fname);
+    GlobalConfig.applied_B_tab_n = n;
 }

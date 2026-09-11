@@ -124,7 +124,8 @@ class SheathField : FieldBC {
     this(double Velectrode, SheathModel model,
          double segment_pitch=0.0, double segment_fill=1.0, double segment_x0=0.0,
          double Ex_applied=0.0, double Ex_quad=0.0, double Ex_cube=0.0,
-         double Ex_ramp_steps=0.0, double Ex_ramp_start=0.0) {
+         double Ex_ramp_steps=0.0, double Ex_ramp_start=0.0,
+         double segment_x1=0.0) {
         this.Velectrode = Velectrode;
         this.model = model;
         this.segment_pitch = segment_pitch;
@@ -135,6 +136,7 @@ class SheathField : FieldBC {
         this.Ex_cube = Ex_cube;
         this.Ex_ramp_steps = Ex_ramp_steps;
         this.Ex_ramp_start = Ex_ramp_start;
+        this.segment_x1 = segment_x1;
     }
 
     /*
@@ -191,7 +193,22 @@ class SheathField : FieldBC {
         term and carry no current (J.n = 0), exactly like ZeroNormalGradient in the
         assembly's treatment of this BC.
     */
+    /*
+        Axial extent of the segmented region. The periodic tiling above runs the whole
+        length of the wall, which is right when the electrodes fill the duct but wrong
+        for a channel longer than the magnet: a segment landing outside the field
+        shorts the plasma while generating no EMF. segment_x1 > segment_x0 restricts
+        the metal to [segment_x0, segment_x1]; leaving it at the default 0.0 keeps the
+        pre-existing unbounded behaviour exactly.
+    */
+    @nogc final bool in_segment_window(const FVInterface face) const {
+        if (!(segment_x1 > segment_x0)) return true;
+        double xf = face.pos.x.re;
+        return (xf >= segment_x0) && (xf <= segment_x1);
+    }
+
     @nogc final bool is_electrode(const FVInterface face) const {
+        if (!in_segment_window(face)) return false;
         if (segment_pitch <= 0.0) return true;
         double s = (face.pos.x.re - segment_x0) % segment_pitch;
         if (s < 0.0) s += segment_pitch;
@@ -242,7 +259,8 @@ class SheathField : FieldBC {
 private:
     double Velectrode;
     SheathModel model;
-    double segment_pitch, segment_fill, segment_x0, Ex_applied, Ex_quad, Ex_cube;
+    double segment_pitch, segment_fill, segment_x0, segment_x1;
+    double Ex_applied, Ex_quad, Ex_cube;
     double Ex_ramp_steps, Ex_ramp_start;
 }
 
@@ -277,13 +295,15 @@ class CircuitElectrode : FieldBC {
     R -> 0 reproduces the SheathField result to 0.05% in F_x and total current.
 */
     this(ExternalCircuit circuit, int node_id, SheathModel model,
-         double segment_pitch=0.0, double segment_fill=1.0, double segment_x0=0.0) {
+         double segment_pitch=0.0, double segment_fill=1.0, double segment_x0=0.0,
+         double segment_x1=0.0) {
         this.circuit = circuit;
         this.node_id = node_id;
         this.model = model;
         this.segment_pitch = segment_pitch;
         this.segment_fill = segment_fill;
         this.segment_x0 = segment_x0;
+        this.segment_x1 = segment_x1;
     }
 
     // The electrode metal potential: the circuit node's CURRENT estimate. Before the
@@ -297,7 +317,22 @@ class CircuitElectrode : FieldBC {
     // Identical to SheathField.is_electrode -- segmented electrodes leave insulator
     // strips between segments so a continuous conductor cannot short the axial Hall
     // field along the wall.
+    /*
+        Axial extent of the segmented region. The periodic tiling above runs the whole
+        length of the wall, which is right when the electrodes fill the duct but wrong
+        for a channel longer than the magnet: a segment landing outside the field
+        shorts the plasma while generating no EMF. segment_x1 > segment_x0 restricts
+        the metal to [segment_x0, segment_x1]; leaving it at the default 0.0 keeps the
+        pre-existing unbounded behaviour exactly.
+    */
+    @nogc final bool in_segment_window(const FVInterface face) const {
+        if (!(segment_x1 > segment_x0)) return true;
+        double xf = face.pos.x.re;
+        return (xf >= segment_x0) && (xf <= segment_x1);
+    }
+
     @nogc final bool is_electrode(const FVInterface face) const {
+        if (!in_segment_window(face)) return false;
         if (segment_pitch <= 0.0) return true;
         double s = (face.pos.x.re - segment_x0) % segment_pitch;
         if (s < 0.0) s += segment_pitch;
@@ -378,7 +413,7 @@ private:
     ExternalCircuit circuit;
     int node_id;
     SheathModel model;
-    double segment_pitch, segment_fill, segment_x0;
+    double segment_pitch, segment_fill, segment_x0, segment_x1;
 }
 
 class MixedField : FieldBC {
@@ -712,9 +747,10 @@ FieldBC create_field_bc(JSONValue field_bc_json, const BoundaryCondition bc, con
         double Ex_cube = getJSONdouble(field_bc_json, "Ex_cube", 0.0);
         double Ex_ramp_steps = getJSONdouble(field_bc_json, "Ex_ramp_steps", 0.0);
         double Ex_ramp_start = getJSONdouble(field_bc_json, "Ex_ramp_start", 0.0);
+        double segment_x1 = getJSONdouble(field_bc_json, "segment_x1", 0.0);
         field_bc = new SheathField(Velectrode, create_sheath_model(sheath_model, field_bc_json),
                                    segment_pitch, segment_fill, segment_x0, Ex_applied, Ex_quad,
-                                   Ex_cube, Ex_ramp_steps, Ex_ramp_start);
+                                   Ex_cube, Ex_ramp_steps, Ex_ramp_start, segment_x1);
         break;
     case "CircuitElectrode":
         if (circuit is null)
@@ -725,9 +761,10 @@ FieldBC create_field_bc(JSONValue field_bc_json, const BoundaryCondition bc, con
         double ce_pitch = getJSONdouble(field_bc_json, "segment_pitch", 0.0);
         double ce_fill = getJSONdouble(field_bc_json, "segment_fill", 1.0);
         double ce_x0 = getJSONdouble(field_bc_json, "segment_x0", 0.0);
+        double ce_x1 = getJSONdouble(field_bc_json, "segment_x1", 0.0);
         field_bc = new CircuitElectrode(circuit, node,
                                         create_sheath_model(ce_sheath_model, field_bc_json),
-                                        ce_pitch, ce_fill, ce_x0);
+                                        ce_pitch, ce_fill, ce_x0, ce_x1);
         break;
     case "MixedField":
         double differential = getJSONdouble(field_bc_json, "differential", 1.0);

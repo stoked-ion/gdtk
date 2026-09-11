@@ -1272,7 +1272,22 @@ void performNewtonKrylovUpdates(int snapshotStart, double startCFL, int maxCPUs,
                     // On step 1, we have no previous residual, so we can't make an adjustment.
                     // Also, we need to check on a residual drop, but this makes no sense
                     // until the reference residuals are established.
-                    if (step > nkCfg.numberOfStepsForSettingReferenceResiduals &&
+                    //
+                    // BUG FIX: this used to read `step > nkCfg.numberOfStepsForSettingReferenceResiduals`,
+                    // an ABSOLUTE step count. That is correct only for the run's very first reference-
+                    // setting window. A phase with reset_reference_residuals=true zeroes
+                    // referenceGlobalResidual at the phase change (see above) and only re-accumulates
+                    // it over the following numberOfStepsForSettingReferenceResiduals steps -- tracked
+                    // by referenceResidualsAreSet, which goes false at the reset and true once that
+                    // window completes (step - referenceResidualBaseStep == ..., below). The absolute
+                    // check is already satisfied by any mid-run reset (step is always > 10 by then), so
+                    // globalResidual/referenceGlobalResidual divided by a JUST-ZEROED reference on this
+                    // exact step -- a literal 0.0 denominator, which a debug build's FP trapping turns
+                    // into SIGFPE. Confirmed reproducible: three independent runs crashed at the exact
+                    // step of a reset_reference_residuals phase transition, all with signal 8 (Floating
+                    // point exception), all traced to this line. Use the flag that actually tracks
+                    // whether the reference is valid instead of the absolute step count.
+                    if (referenceResidualsAreSet &&
                       omega >= nkCfg.minRelaxationFactorForCFLGrowth) { // TODO: consider only limiting CFL growth based on the relaxation factor for the residual-based cflSelector
                        cfl = cflSelector.nextCFL(cfl, step, globalResidual, prevGlobalResidual, globalResidual/referenceGlobalResidual);
                     }

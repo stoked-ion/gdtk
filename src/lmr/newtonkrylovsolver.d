@@ -757,7 +757,10 @@ void initNewtonKrylovSimulation(int snapshotStart, int maxCPUs, int threadsPerMP
      */
     initThreadPool(1, 1);
 
-    initFluidBlocksBasic(cfgData);
+    // withUserPad, as the transient solver does (timemarching.d): otherwise a steady
+    // UDF that reads userPad finds it nil in the block interpreters until the first
+    // atIterationStart call, and the initial residual evaluation precedes that call.
+    initFluidBlocksBasic(cfgData, true);
     initFluidBlocksMemoryAllocation();
     initFluidBlocksGlobalCellIDStarts();
     initFluidBlocksZones();
@@ -1401,7 +1404,12 @@ void performNewtonKrylovUpdates(int snapshotStart, double startCFL, int maxCPUs,
         if (GlobalConfig.udf_supervisor_file.length > 0) {
             // Note that the following call allows the user to do almost anything
             // at the start of the time step, including changing flow states in cells.
-            call_UDF_at_iteration_start(AtStartFnName.at_timestep_start);
+            // BUG FIX: this passed AtStartFnName.at_timestep_start, which invokes the
+            // TRANSIENT hook atTimestepStart with SimState.time (-1 in a steady run) and
+            // discards the NKSimState set just above. The documented steady-state hook,
+            // atIterationStart(tab) with tab.step/tab.phase/tab.cfl (commit 15646fc1), was
+            // therefore never called by the Newton-Krylov solver.
+            call_UDF_at_iteration_start(AtStartFnName.at_iteration_start);
             // If the user has adjusted any of the flow states via the Lua functions,
             // we will beed to re-encode the conserved quantities, so that they have
             // consistent data.

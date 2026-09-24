@@ -154,6 +154,16 @@ public:
     // Electromagnetic Field Variables
     double electric_potential;
     double[2] electric_field;
+    // The cell-centre Hall parameter the FIELD SOLVE itself used on its last solve
+    // (filled in ElectricField.computeHallVertexField), exposed to the UDF as
+    // cell.hall_beta. A DIAGNOSTIC: compare it with a UDF's own beta to catch drift
+    // (e.g. a Lua neutral-density floor of 1e18 against the solver's 1e16). Do not
+    // build the J x B source from it in a steady run. Measured on SIMPLE/mini: F_x
+    // within 0.005%, but the residual stalls at 3e-2 instead of reaching 5e-7 (one
+    // run each; cause not isolated). NOT a Jacobian effect: Lua sees only real parts,
+    // so a UDF source is invisible to the complex-step Jacobian whichever beta it
+    // uses. 0 when Hall is off or the field is unsolved.
+    double hall_beta = 0.0;
 
     // Shape sensitivity calculator workspace
     FluidFVCell[] cell_list;            // list of cells in the residual stencil

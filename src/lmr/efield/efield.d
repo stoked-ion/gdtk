@@ -244,6 +244,10 @@ class ElectricField {
                 double beta = conductivity.hall_beta(cell.fs.gas, gmodel,
                                                      appliedBzAt(cell.pos[0].x.re));
                 sigmaH_cell[k] = sig*beta/(1.0 + beta*beta);
+                // Cache for the UDF (read-only there). Written here, in this serial loop,
+                // rather than recomputed from the UDF: the conductivity model reuses a
+                // member scratch buffer, and UDF source terms run in parallel over blocks.
+                cell.hall_beta = beta;
             }
         }
 

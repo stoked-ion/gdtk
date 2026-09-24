@@ -406,6 +406,9 @@ void pushFluidCellToTable(lua_State* L, int tblIdx, ref const(FluidFVCell) cell,
     // wrong everywhere outside the flat region. Equals config.applied_Bz when no taper
     // is configured.
     lua_pushnumber(L, appliedBzAt(cell.pos[0].x.re)); lua_setfield(L, tblIdx, "Bz_applied");
+    // The Hall parameter the field solve used for this cell -- a diagnostic; see
+    // FluidFVCell.hall_beta for why a steady source term should not be built from it.
+    lua_pushnumber(L, cell.hall_beta); lua_setfield(L, tblIdx, "hall_beta");
 } // end pushFluidCellToTable()
 
 void pushFluidFaceToTable(lua_State* L, int tblIdx, ref const(FVInterface) face,

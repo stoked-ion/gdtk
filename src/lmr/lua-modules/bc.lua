@@ -643,6 +643,9 @@ end
 --   "diode"          conducts only for |dV| > Vfall           [Rsheath, Vfall, leak]
 --   "child-langmuir" J = K*|dV|^1.5 (space-charge-limited)    [K, leak, dV_lin]
 --   "saturation"     resistive, capped at the electron sat.   [Rsheath, Vfall, leak]
+--   "saturation-asym" ion(Bohm)+Jemit one way, electron sat.   [Rsheath, Vfall, leak, Jemit]
+--                    the physically asymmetric version: a cold cathode can only collect
+--                    ions (~176x less than the electron flux for argon) unless it emits.
 -- with dV = phi_edge - Velectrode. All param fields are emitted; the chosen model reads
 -- the ones it needs. Defaults reproduce the Phase-1 linear sheath.
 -- Segmented electrodes (for Hall-effect runs, where a continuous conductor shorts the
@@ -662,7 +665,7 @@ end
 -- pairs (Faraday) or a prescribed tilt (diagonal), SheathField is correct and
 -- cheaper. Two electrode groups naming the SAME node are shorted together.
 CircuitElectrode = FieldBoundary:new{node=0, sheath_model="linear",
-                                     Rsheath=1.0, Vfall=0.0, K=1.0e-3, leak=1.0e-6, dV_lin=1.0,
+                                     Rsheath=1.0, Vfall=0.0, K=1.0e-3, leak=1.0e-6, dV_lin=1.0, Jemit=0.0,
                                      segment_pitch=0.0, segment_fill=1.0, segment_x0=0.0,
                                      segment_x1=0.0}
 CircuitElectrode.name = "CircuitElectrode"
@@ -679,6 +682,7 @@ function CircuitElectrode:tojson()
    str = str .. string.format('"K": %.18e, ', self.K)
    str = str .. string.format('"leak": %.18e, ', self.leak)
    str = str .. string.format('"dV_lin": %.18e, ', self.dV_lin)
+   str = str .. string.format('"Jemit": %.18e, ', self.Jemit)
    str = str .. string.format('"segment_pitch": %.18e, ', self.segment_pitch)
    str = str .. string.format('"segment_fill": %.18e, ', self.segment_fill)
    str = str .. string.format('"segment_x0": %.18e, ', self.segment_x0)
@@ -688,7 +692,7 @@ function CircuitElectrode:tojson()
 end
 
 SheathField = FieldBoundary:new{Velectrode=0.0, sheath_model="linear",
-                                Rsheath=1.0, Vfall=0.0, K=1.0e-3, leak=1.0e-6, dV_lin=1.0,
+                                Rsheath=1.0, Vfall=0.0, K=1.0e-3, leak=1.0e-6, dV_lin=1.0, Jemit=0.0,
                                 segment_pitch=0.0, segment_fill=1.0, segment_x0=0.0,
                                 Ex_applied=0.0, Ex_quad=0.0, Ex_cube=0.0,
                                 -- A tilt is a large perturbation and generally cannot be
@@ -716,6 +720,7 @@ function SheathField:tojson()
    str = str .. string.format('"K": %.18e, ', self.K)
    str = str .. string.format('"leak": %.18e, ', self.leak)
    str = str .. string.format('"dV_lin": %.18e, ', self.dV_lin)
+   str = str .. string.format('"Jemit": %.18e, ', self.Jemit)
    str = str .. string.format('"segment_pitch": %.18e, ', self.segment_pitch)
    str = str .. string.format('"segment_fill": %.18e, ', self.segment_fill)
    str = str .. string.format('"segment_x0": %.18e, ', self.segment_x0)

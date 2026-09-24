@@ -128,6 +128,59 @@ private:
     double Rs, Vfall, leak;
 }
 
+// Asymmetric saturation sheath.  The symmetric SaturationSheath above clamps both
+// polarities at the ELECTRON thermal flux, which is right for an electron-collecting
+// anode and ~176x too generous for an ion-collecting cathode (argon).  A real sheath is
+// asymmetric: a surface that must pass current while at NEGATIVE bias relative to the
+// plasma can only collect ions, limited by the Bohm current, unless it EMITS electrons.
+//
+//   dV = phi_cell - Velectrode.  dV > 0 => metal negative wrt plasma => collects IONS.
+//   J > 0 is current out of the plasma into the metal (the ion-collection sense).
+//
+//   ion branch      J <=  0.61 n_e e sqrt(k Te / m_i)   + Jemit
+//   electron branch J >= -0.25 n_e e sqrt(8 k Te/(pi m_e))
+//
+// Jemit [A/m^2] is a floor of emitted electron current from a hot cathode (thermionic /
+// arc-spot); it ADDS to the ion-side ceiling because emitted electrons leaving the metal
+// carry current in the same sense as collected ions.  Jemit = 0 models a cold electrode.
+class AsymmetricSaturationSheath : SheathModel {
+    this(double Rsheath, double Vfall, double leak, double Jemit) {
+        this.Rs = (Rsheath > 0.0) ? Rsheath : 1.0e-30;
+        this.Vfall = Vfall;
+        this.leak = leak;
+        this.Jemit = Jemit;
+    }
+    private void limits(ref const(GasState) gs, GasModel gm, out double Jion, out double Jele){
+        int ie = gm.species_index("e-");
+        if (ie < 0) { Jion = 1.0e30; Jele = 1.0e30; return; }
+        double n_e = Avogadro_number*gs.massf[ie].re*gs.rho.re/gm.mol_masses[ie];
+        double Te  = (gm.n_modes > 0) ? gs.T_modes[gm.n_modes-1].re : gs.T.re;
+        double m_e = gm.mol_masses[ie]/Avogadro_number;
+        // dominant ion: prefer an explicit "Ar+", else fall back to the heaviest species
+        int ii = gm.species_index("Ar+");
+        double M_i = (ii >= 0) ? gm.mol_masses[ii] : gm.mol_masses[0];
+        double m_i = M_i/Avogadro_number;
+        double cs  = sqrt(Boltzmann_constant*Te/m_i);                 // Bohm speed
+        double vth = sqrt(8.0*Boltzmann_constant*Te/(PI*m_e));
+        Jion = 0.61*n_e*elementary_charge*cs + Jemit;
+        Jele = 0.25*n_e*elementary_charge*vth;
+    }
+    final double current(double dV, ref const(GasState) gs, GasModel gm){
+        double Jlin = (dV - Vfall)/Rs;
+        double Jion, Jele; limits(gs, gm, Jion, Jele);
+        if (Jlin >  Jion) return  Jion + leak*dV;
+        if (Jlin < -Jele) return -Jele + leak*dV;
+        return Jlin + leak*dV;
+    }
+    final double conductance(double dV, ref const(GasState) gs, GasModel gm){
+        double Jlin = (dV - Vfall)/Rs;
+        double Jion, Jele; limits(gs, gm, Jion, Jele);
+        return (Jlin > Jion || Jlin < -Jele) ? leak : (1.0/Rs + leak);
+    }
+private:
+    double Rs, Vfall, leak, Jemit;
+}
+
 // Factory: build a SheathModel from its name + the BC's JSON parameter table.
 SheathModel create_sheath_model(string name, JSONValue j){
     double leak = getJSONdouble(j, "leak", 1.0e-6);
@@ -143,7 +196,11 @@ SheathModel create_sheath_model(string name, JSONValue j){
                                        getJSONdouble(j, "dV_lin", 1.0));
     case "saturation":
         return new SaturationSheath(getJSONdouble(j, "Rsheath", 1.0), getJSONdouble(j, "Vfall", 0.0), leak);
+    case "saturation-asym":
+        return new AsymmetricSaturationSheath(getJSONdouble(j, "Rsheath", 1.0),
+                                              getJSONdouble(j, "Vfall", 0.0), leak,
+                                              getJSONdouble(j, "Jemit", 0.0));
     default:
-        throw new Error(format("Unknown sheath_model '%s' (use linear|diode|child-langmuir|saturation).", name));
+        throw new Error(format("Unknown sheath_model '%s' (use linear|diode|child-langmuir|saturation|saturation-asym).", name));
     }
 }

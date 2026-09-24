@@ -61,7 +61,21 @@ class DiodeSheath : SheathModel {
         return J;
     }
     final double conductance(double dV, ref const(GasState) gs, GasModel gm){
-        return (fabs(dV) > Vfall) ? (1.0/Rs + leak) : leak;
+        // The true differential conductance is discontinuous -- 1/Rs + leak beyond the
+        // fall voltage, leak alone inside it -- a jump of ~1e11 for Rs = 1e-5, leak = 1e-6.
+        // Two failures follow. The FIRST field solve is seeded at dV = 0 (phi = Velectrode),
+        // inside the fall, so every electrode face carries only the leak and nothing
+        // anchors the potential level: the system is near-singular and the field BGMRes
+        // fails (measured: at step 520 on every drive, 150/200/250 V). And a face whose dV
+        // crosses +/-Vfall between linearizations flips its row by 1e11.
+        //
+        // As for ChildLangmuirSheath's dV_lin, linearize with a well-conditioned slope --
+        // here the conducting-branch slope everywhere. current() is unchanged, and the
+        // converged physics is untouched: the Robin fixed point satisfies flux = S*J(dV)
+        // exactly, independent of the slope used to reach it. Using the steepest slope is
+        // also the conservative choice for the fixed-point iteration (it over-damps rather
+        // than overshoots when a face sits inside the fall).
+        return 1.0/Rs + leak;
     }
 private:
     double Rs, Vfall, leak;

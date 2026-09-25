@@ -1252,6 +1252,7 @@ final class GlobalConfig {
     shared static double mhd_source_xmax = 1.0e300;
     shared static double mhd_source_ymin = -1.0e300;
     shared static double mhd_source_ymax = 1.0e300;
+    shared static double mhd_source_yguard_xmax = 1.0e300;  // y-limits apply only for x <= this
     shared static int mhd_source_ramp_start = 0;
     shared static int mhd_source_ramp_steps = 0;
     // Carry sigma and beta in `number` in the MHD source (Coulomb model only), so the
@@ -2158,6 +2159,7 @@ void set_config_for_core(JSONValue jsonData)
     mixin(update_double("mhd_source_xmax", "mhd_source_xmax"));
     mixin(update_double("mhd_source_ymin", "mhd_source_ymin"));
     mixin(update_double("mhd_source_ymax", "mhd_source_ymax"));
+    mixin(update_double("mhd_source_yguard_xmax", "mhd_source_yguard_xmax"));
     mixin(update_int("mhd_source_ramp_start", "mhd_source_ramp_start"));
     mixin(update_int("mhd_source_ramp_steps", "mhd_source_ramp_steps"));
     mixin(update_bool("mhd_source_differentiate_sigma", "mhd_source_differentiate_sigma"));

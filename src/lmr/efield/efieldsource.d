@@ -59,8 +59,12 @@ import lmr.globaldata : SimState;
 {
     if (!GlobalConfig.mhd_source) return;
     immutable double x = cell.pos[0].x.re, y = cell.pos[0].y.re;
-    if (x < GlobalConfig.mhd_source_xmin || x > GlobalConfig.mhd_source_xmax ||
-        y < GlobalConfig.mhd_source_ymin || y > GlobalConfig.mhd_source_ymax) return;
+    if (x < GlobalConfig.mhd_source_xmin || x > GlobalConfig.mhd_source_xmax) return;
+    // The y-limits (typically a guard on the cell rows touching the electrodes) apply
+    // only up to mhd_source_yguard_xmax, e.g. over a constant-area duct but not the
+    // diverging nozzle downstream, whose walls lie outside [ymin, ymax].
+    if (x <= GlobalConfig.mhd_source_yguard_xmax &&
+        (y < GlobalConfig.mhd_source_ymin || y > GlobalConfig.mhd_source_ymax)) return;
     immutable double Exs = cell.electric_field[0], Eys = cell.electric_field[1];
     if (isNaN(Exs) || isNaN(Eys)) return;   // field not solved yet
     immutable double factor = mhdSourceRampFactor();

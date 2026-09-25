@@ -45,6 +45,7 @@ configOptionsHidden = { -- hidden from user
    mhd_source_xmax = 1.0e300,
    mhd_source_ymin = -1.0e300,
    mhd_source_ymax = 1.0e300,
+   mhd_source_yguard_xmax = 1.0e300,
    mhd_source_ramp_start = 0,
    mhd_source_ramp_steps = 0,
    mhd_source_differentiate_sigma = true,

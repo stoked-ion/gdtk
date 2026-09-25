@@ -1242,6 +1242,18 @@ final class GlobalConfig {
     shared static double applied_B_ramp = 0.0;  // 0 => uniform, as before
     shared static double applied_B_x0 = 0.0;    // upstream edge of the magnet
     shared static double applied_B_x1 = 0.0;    // downstream edge
+    // Built-in low-Rm MHD source (efield/efieldsource.d): the Lorentz force J x B and
+    // the Joule heating from the solved field, in D rather than in a Lua UDF, so that
+    // they are evaluated in `number` arithmetic and enter the Newton Jacobian. Off by
+    // default. The box limits where it applies (cell centres); the ramp smoothsteps it
+    // on over ramp_steps Newton/time steps starting at ramp_start (0 steps = no ramp).
+    shared static bool mhd_source = false;
+    shared static double mhd_source_xmin = -1.0e300;
+    shared static double mhd_source_xmax = 1.0e300;
+    shared static double mhd_source_ymin = -1.0e300;
+    shared static double mhd_source_ymax = 1.0e300;
+    shared static int mhd_source_ramp_start = 0;
+    shared static int mhd_source_ramp_steps = 0;
     // TABULATED axial field, from a magnetostatic solution (e.g. FEMM) rather than the
     // tanh idealisation. The tanh window is single-humped, y-uniform and strictly
     // positive; a real magnet assembly is none of those. Measured on the X2 64 mm-gap
@@ -2138,6 +2150,13 @@ void set_config_for_core(JSONValue jsonData)
     mixin(update_double("applied_B_ramp", "applied_B_ramp"));
     mixin(update_double("applied_B_x0", "applied_B_x0"));
     mixin(update_double("applied_B_x1", "applied_B_x1"));
+    mixin(update_bool("mhd_source", "mhd_source"));
+    mixin(update_double("mhd_source_xmin", "mhd_source_xmin"));
+    mixin(update_double("mhd_source_xmax", "mhd_source_xmax"));
+    mixin(update_double("mhd_source_ymin", "mhd_source_ymin"));
+    mixin(update_double("mhd_source_ymax", "mhd_source_ymax"));
+    mixin(update_int("mhd_source_ramp_start", "mhd_source_ramp_start"));
+    mixin(update_int("mhd_source_ramp_steps", "mhd_source_ramp_steps"));
     mixin(update_string("applied_B_table", "applied_B_table"));
     loadAppliedBTable();
     mixin(update_int("electric_field_gmres_iters", "electric_field_gmres_iters"));

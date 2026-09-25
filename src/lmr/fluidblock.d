@@ -52,6 +52,7 @@ import lmr.lua_helper;
 import lmr.sfluidblock; // needed for some special-case processing, below
 import lmr.shockdetectors;
 import lmr.user_defined_source_terms;
+import lmr.efield.efieldsource : addMHDSource;
 import lmr.mass_diffusion;
 
 // version(diagnostics) {
@@ -1860,6 +1861,9 @@ public:
                 getUDFSourceTermsForCell(myL, cell, 0, 0.0, myConfig, id, i_cell, j_cell, k_cell);
                 cell.add_udf_source_vector();
             }
+            // Built-in MHD source: evaluated on the PERTURBED state, which is the point --
+            // this is how the preconditioner sees d(J x B)/dU.
+            if (GlobalConfig.mhd_source) { addMHDSource(cell, myConfig); }
             cell.time_derivatives(gtl, ftl);
         }
 
@@ -2047,6 +2051,7 @@ public:
             c.add_thermochemical_source_vector(thermochem_source, reaction_fraction);
         }
         if (myConfig.udf_source_terms) { c.add_udf_source_vector(); }
+        if (GlobalConfig.mhd_source) { addMHDSource(c, myConfig); }
         c.time_derivatives(gtl, ftl);
     } // end evalRU()
 
@@ -2195,6 +2200,11 @@ public:
                 auto cell = cells[i];
                 cell.add_udf_source_vector();
             }
+        }
+        // Built-in MHD source (config.mhd_source); independent of the UDF switch.
+        if (GlobalConfig.mhd_source) {
+            if (cell_list.length==0) cell_list = celldata.all_cell_idxs;
+            foreach (i; cell_list) { addMHDSource(cells[i], myConfig); }
         }
     }
 } // end class FluidBlock

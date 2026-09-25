@@ -99,6 +99,7 @@ LMR_EFIELD_FILES := $(LMR)/efield/efield.d \
 	$(LMR)/efield/efieldexchange.d \
 	$(LMR)/efield/efieldderivatives.d \
 	$(LMR)/efield/efieldsheath.d \
+	$(LMR)/efield/efieldsource.d \
 	$(LMR)/efield/efieldcircuit.d \
 	$(LMR)/efield/efieldbc.d
 

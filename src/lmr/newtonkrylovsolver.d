@@ -1295,8 +1295,20 @@ void performNewtonKrylovUpdates(int snapshotStart, double startCFL, int maxCPUs,
             setPhaseSettings(currentPhase);
             if (currentPhase == nkCfg.numberOfPhases-1) terminalPhase = true;
             if (activePhase.useAutoCFL) {
+                // BUG FIX: rebuild the selector from THIS phase's settings. It was built
+                // only at a fresh start (phase 0's settings) or on a restart (the restart
+                // phase's), so in a continuous run every later phase silently kept phase 0's
+                // max_cfl, growth threshold and ratio limits -- and a restart changed the
+                // algorithm. Measured: a phase with reset_reference_residuals sat at
+                // relative residual ~0.3-0.9 against phase 0's growth threshold of 0.1, so
+                // the CFL froze at 0.153 for 2500 steps; the same case restarted (selector
+                // rebuilt with its own threshold 0.99) converged. Phase max_cfl caps were
+                // likewise never applied (CFL 316 against a declared cap of 25).
+                cflSelector = new ResidualBasedAutoCFL(activePhase.autoCFLExponent, activePhase.maxCFL,
+                                                       activePhase.thresholdRelativeResidualForCFLGrowth,
+                                                       activePhase.limitOnCFLIncreaseRatio, activePhase.limitOnCFLDecreaseRatio);
                 // If the user gives us a positive startCFL, use that.
-                // Otherwise we continue with the CFL we have. In other words, do nothing special here.
+                // Otherwise we continue with the CFL we have.
                 if (activePhase.startCFL > 0.0) cfl = activePhase.startCFL;
             }
             if (cfg.is_master_task) {

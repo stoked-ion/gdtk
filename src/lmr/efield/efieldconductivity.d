@@ -17,6 +17,7 @@ import gas.gas_state;
 import gas.physical_constants;
 import geom;
 import nm.number;
+import ntypes.complex;
 import lmr.mass_diffusion;
 
 interface ConductivityModel{
@@ -168,7 +169,51 @@ class CoulombConductivity : ConductivityModel{
         electron_collision_state(gs, gm, n_e, nu);
         return elementary_charge*Bz/(_m_e*nu);
     }
+    /*
+        Complex-step-differentiable twins of opCall and hall_beta, used ONLY by the
+        built-in MHD source (efieldsource.d) so that the Newton Jacobian sees how Joule
+        heating depends on Te through sigma and beta. Same fits, clamps and constants
+        as electron_collision_state, carried in `number`. Kept separate so the field
+        solve and everything else stay on the real-valued path, bit for bit.
+    */
+    @nogc final number sigma_z(ref const(GasState) gs, GasModel gm){
+        number n_e, nu;
+        electron_collision_state_z(gs, gm, n_e, nu);
+        return n_e*elementary_charge*elementary_charge/(_m_e*nu);
+    }
+    @nogc final number hall_beta_z(ref const(GasState) gs, GasModel gm, double Bz){
+        number beta = 0.0;
+        if (Bz == 0.0) return beta;
+        number n_e, nu;
+        electron_collision_state_z(gs, gm, n_e, nu);
+        beta = elementary_charge*Bz/(_m_e*nu);
+        return beta;
+    }
 private:
+    @nogc void electron_collision_state_z(ref const(GasState) gs, GasModel gm, out number n_e, out number nu){
+        gm.massf2numden(gs, number_density);
+        n_e = 0.0;
+        if (electron_idx >= 0) n_e = number_density[electron_idx];
+        immutable size_t e_idx = (electron_idx >= 0) ? cast(size_t) electron_idx : size_t.max;
+        number n_heavy = 0.0;
+        foreach(i; 0 .. nsp){ if (i != e_idx) n_heavy += number_density[i]; }
+        n_e = fmax(n_e, 1.0e10);
+        number n_neutral = fmax(n_heavy - n_e, 1.0e16);
+        number Te = (gm.n_modes > 0) ? gs.T_modes[$-1] : gs.T;
+        Te = fmax(3000.0, fmin(Te, 500.0e3));
+        number Q_ea;
+        if (Te.re < 10.0e3) {
+            Q_ea = 0.39 + Te*(-0.551e-4 + 0.595e-8*Te);
+        } else {
+            Q_ea = -0.35 + 0.775e-4*Te;
+        }
+        Q_ea *= 1.0e-20;
+        number Q_ei = 1.95e-10/(Te*Te)*log(1.53e8*Te*Te*Te/(n_e/1.0e6));
+        if (Q_ei.re < 0.0) Q_ei = 0.0;
+        immutable double pi_d = PI;   // PI is `real`; keep the expression in Complex!double
+        number v_th = sqrt(8.0*Boltzmann_constant*Te/(pi_d*_m_e));
+        nu = fmax(n_neutral*v_th*Q_ea + n_e*v_th*Q_ei, 1.0e6);
+    }
     @nogc void electron_collision_state(ref const(GasState) gs, GasModel gm, out double n_e, out double nu){
         gm.massf2numden(gs, number_density);
         n_e = (electron_idx >= 0) ? number_density[electron_idx].re : 0.0;

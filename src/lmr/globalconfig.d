@@ -1254,6 +1254,9 @@ final class GlobalConfig {
     shared static double mhd_source_ymax = 1.0e300;
     shared static int mhd_source_ramp_start = 0;
     shared static int mhd_source_ramp_steps = 0;
+    // Carry sigma and beta in `number` in the MHD source (Coulomb model only), so the
+    // Jacobian sees d(Joule)/dTe. false = real-valued sigma/beta (stage-1 behaviour).
+    shared static bool mhd_source_differentiate_sigma = true;
     // TABULATED axial field, from a magnetostatic solution (e.g. FEMM) rather than the
     // tanh idealisation. The tanh window is single-humped, y-uniform and strictly
     // positive; a real magnet assembly is none of those. Measured on the X2 64 mm-gap
@@ -2157,6 +2160,7 @@ void set_config_for_core(JSONValue jsonData)
     mixin(update_double("mhd_source_ymax", "mhd_source_ymax"));
     mixin(update_int("mhd_source_ramp_start", "mhd_source_ramp_start"));
     mixin(update_int("mhd_source_ramp_steps", "mhd_source_ramp_steps"));
+    mixin(update_bool("mhd_source_differentiate_sigma", "mhd_source_differentiate_sigma"));
     mixin(update_string("applied_B_table", "applied_B_table"));
     loadAppliedBTable();
     mixin(update_int("electric_field_gmres_iters", "electric_field_gmres_iters"));

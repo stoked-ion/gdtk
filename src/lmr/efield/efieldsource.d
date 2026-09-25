@@ -8,10 +8,11 @@
  * serve: Lua sees only the real part of every quantity, so a UDF source enters the
  * complex-step Jacobian (preconditioner and Frechet products alike) as a constant.
  * Here the velocity is carried in `number` arithmetic, so the Jacobian sees the
- * magnetic braking dF_x/du_x = -sigma_P B^2 and the matching Joule terms. sigma and
- * beta are still real (the conductivity models evaluate in double), and E is whatever
- * the field solve left in the cell, so this is the flow-side, fixed-field part of the
- * coupling only.
+ * magnetic braking dF_x/du_x = -sigma_P B^2 and the matching Joule terms. With the
+ * Coulomb model, sigma and beta are also carried in `number` (mhd_source_differentiate_
+ * sigma, default on), so the Jacobian sees how Joule heating depends on Te -- measured
+ * to be the stiff term, where braking is not (~1e-3 per step at beta ~15). E is whatever
+ * the field solve left in the cell, so this is the fixed-field part of the coupling.
  *
  * Generalised Ohm's law with the Hall tensor, identical to the UDF and to efield.d:
  *   J = sigma/(1+beta^2) [[1, -beta], [beta, 1]] (E + u x B),  B = Bz z-hat,
@@ -36,6 +37,7 @@ import std.math;
 import nm.number;
 import ntypes.complex;
 
+import lmr.efield.efieldconductivity : CoulombConductivity;
 import lmr.fluidfvcell;
 import lmr.globalconfig;
 import lmr.globaldata : SimState;
@@ -68,12 +70,22 @@ import lmr.globaldata : SimState;
     auto cqi = myConfig.cqi;
     immutable double Bz = appliedBzAt(x);
     immutable double Ex = -Exs, Ey = -Eys;   // physical E = -grad(phi)
-    number sigma = cell.fs.gas.sigma;
-    if (sigma.re < 1.0e-10) sigma = 1.0e-10;
-    double beta = 0.0;
-    if (GlobalConfig.electric_field_hall_effect && Bz != 0.0 && myConfig.conductivity_model) {
-        beta = myConfig.conductivity_model.hall_beta(cell.fs.gas, gm, Bz);
+    // Stage 2: with the Coulomb model, sigma and beta are recomputed here in `number`
+    // (sigma_z/hall_beta_z) so the Jacobian sees d(Joule)/dTe. Otherwise, or with
+    // mhd_source_differentiate_sigma = false, they are the real values (stage 1).
+    immutable bool hall = GlobalConfig.electric_field_hall_effect && Bz != 0.0
+        && (myConfig.conductivity_model !is null);
+    auto coulomb = cast(CoulombConductivity) myConfig.conductivity_model;
+    number sigma;
+    number beta = 0.0;
+    if (GlobalConfig.mhd_source_differentiate_sigma && coulomb !is null) {
+        sigma = coulomb.sigma_z(cell.fs.gas, gm);
+        if (hall) beta = coulomb.hall_beta_z(cell.fs.gas, gm, Bz);
+    } else {
+        sigma = cell.fs.gas.sigma;
+        if (hall) beta = myConfig.conductivity_model.hall_beta(cell.fs.gas, gm, Bz);
     }
+    if (sigma.re < 1.0e-10) sigma = 1.0e-10;
     number ux = cell.fs.vel.x, uy = cell.fs.vel.y;
     number s = sigma/(1.0 + beta*beta);
     number Jx = s*((Ex - beta*Ey) + Bz*(uy + beta*ux));

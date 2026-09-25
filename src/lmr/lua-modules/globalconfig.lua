@@ -47,6 +47,7 @@ configOptionsHidden = { -- hidden from user
    mhd_source_ymax = 1.0e300,
    mhd_source_ramp_start = 0,
    mhd_source_ramp_steps = 0,
+   mhd_source_differentiate_sigma = true,
    electric_field_gmres_iters = -1,
    electric_field_freeze_in_linear_solve = false,
    electric_field_start_step = 0,

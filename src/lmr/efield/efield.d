@@ -1262,8 +1262,9 @@ class ElectricField {
             // mis-assembled circuit; this one is for reading the CONVERGED state off the
             // end of a run -- node potentials, supply-leg currents and the total supplied
             // power, which is topology dependent and cannot be reconstructed afterwards
-            // from the flow field alone.
-            if (circuit_solve_count >= 3 && (circuit_solve_count % 500) == 0
+            // from the flow field alone. Every 100 solves: at one field solve per several
+            // Newton steps, every 500 gave a single line in a 4000-step run.
+            if (circuit_solve_count >= 3 && (circuit_solve_count % 100) == 0
                 && GlobalConfig.is_master_task) {
                 double[] legI;
                 double Psup = circuit.supplyPower(legI);

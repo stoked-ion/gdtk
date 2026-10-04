@@ -560,6 +560,7 @@ class ElectricField {
 
                 double Bz_nom = appliedBzNominal();
                 bool hall_on = GlobalConfig.electric_field_hall_effect && (Bz_nom != 0.0);
+                immutable bool by_mode = (GlobalConfig.applied_B_direction == "y");
 
                 // ---------------------------------------------------------------------
                 // PATH 2: the insulating-wall boundary condition for the FULL tensor.
@@ -767,6 +768,23 @@ class ElectricField {
                     } else {
                         mSx = sigmaP*nxF;                    // symmetric (Pedersen) part only
                         mSy = sigmaP*nyF;
+                    }
+                    // IN-PLANE FIELD (config.applied_B_direction = "y", B = B_y yhat). Ohm's
+                    // law with the Hall term, J + beta*J x yhat = sigma*(E + u_x*B ez), gives
+                    //   J_x = sigma/(1+beta^2)*(E_x + beta*u_x*B),  J_y = sigma*E_y,
+                    //   J_z = sigma/(1+beta^2)*(u_x*B - beta*E_x)   (closed, out of plane).
+                    // So the in-plane tensor is DIAGONAL, M = diag(sigma_P, sigma), symmetric,
+                    // and m = M n; the axial EMF beta*u_x*B is added as a source below. The
+                    // hybrid stencil already handles an m that is not parallel to n. A wall
+                    // normal to B (n = +-y) sees the plain sigma, so the sheath and insulator
+                    // conditions are unchanged; the B_z Hall machinery is off (beta = 0
+                    // above), enforced at config read.
+                    double betaY = 0.0, obbY = 1.0;
+                    if (by_mode) {
+                        betaY = conductivity.hall_beta(face.fs.gas, gmodel, Bz_app);
+                        obbY = 1.0/(1.0 + betaY*betaY);
+                        mSx = sigmaF*obbY*nxF;
+                        mSy = sigmaF*nyF;
                     }
 
                     // Hybrid method
@@ -1091,8 +1109,14 @@ class ElectricField {
                                 mx = sigmaP*(nxF + bi*nyF);
                                 my = sigmaP*(nyF - bi*nxF);
                             }
-                            // (u x B) = (uy*Bz, -ux*Bz, 0); source = m.(uxB) S
-                            b[k] += S * Bz_app * (mx*uyf - my*uxf);
+                            if (by_mode) {
+                                // In-plane B_y: u x B is out of plane; the in-plane EMF is the
+                                // Hall-coupled axial term, e = (beta*u_x*B, 0), source = (M n).e S.
+                                b[k] += S * sigmaF*obbY*nxF * betaY*uxf*Bz_app;
+                            } else {
+                                // (u x B) = (uy*Bz, -ux*Bz, 0); source = m.(uxB) S
+                                b[k] += S * Bz_app * (mx*uyf - my*uxf);
+                            }
                         }
                     }
                 }

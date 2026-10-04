@@ -1252,6 +1252,13 @@ final class GlobalConfig {
     shared static double mhd_source_xmax = 1.0e300;
     shared static double mhd_source_ymin = -1.0e300;
     shared static double mhd_source_ymax = 1.0e300;
+    // Direction of the applied magnetic field for the electric-field solve. "z" (default):
+    // out of plane, the established path. "y": IN-PLANE, along the wall normal -- the planar
+    // analogue of a closed-drift (Hall-thruster) channel: u x B is then out of plane, the
+    // Hall current J_z closes on itself through the (infinite) depth, and the in-plane
+    // conductivity is the diagonal tensor diag(sigma/(1+beta^2), sigma) with an axial EMF
+    // beta*u_x*B. Requires electric_field_hall_effect = false (that machinery is B_z only).
+    shared static string applied_B_direction = "z";
     shared static double mhd_source_yguard_xmax = 1.0e300;  // y-limits apply only for x <= this
     shared static int mhd_source_ramp_start = 0;
     shared static int mhd_source_ramp_steps = 0;
@@ -2159,6 +2166,12 @@ void set_config_for_core(JSONValue jsonData)
     mixin(update_double("mhd_source_xmax", "mhd_source_xmax"));
     mixin(update_double("mhd_source_ymin", "mhd_source_ymin"));
     mixin(update_double("mhd_source_ymax", "mhd_source_ymax"));
+    mixin(update_string("applied_B_direction", "applied_B_direction"));
+    if (cfg.applied_B_direction != "z" && cfg.applied_B_direction != "y")
+        throw new Error("config.applied_B_direction must be \"z\" or \"y\", got: " ~ cfg.applied_B_direction);
+    if (cfg.applied_B_direction == "y" && cfg.electric_field_hall_effect)
+        throw new Error("config.applied_B_direction = \"y\" requires electric_field_hall_effect = false: "
+                        ~ "the in-plane mode carries its own (diagonal) Hall tensor, and the B_z Hall machinery must stay off.");
     mixin(update_double("mhd_source_yguard_xmax", "mhd_source_yguard_xmax"));
     mixin(update_int("mhd_source_ramp_start", "mhd_source_ramp_start"));
     mixin(update_int("mhd_source_ramp_steps", "mhd_source_ramp_steps"));

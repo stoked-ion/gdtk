@@ -19,6 +19,7 @@ import geom;
 import nm.number;
 import ntypes.complex;
 import lmr.mass_diffusion;
+import lmr.globalconfig : GlobalConfig, appliedBzNominal;
 
 interface ConductivityModel{
     @nogc number opCall(ref const(GasState) gs, const Vector3 pos, GasModel gm);
@@ -213,6 +214,7 @@ private:
         immutable double pi_d = PI;   // PI is `real`; keep the expression in Complex!double
         number v_th = sqrt(8.0*Boltzmann_constant*Te/(pi_d*_m_e));
         nu = fmax(n_neutral*v_th*Q_ea + n_e*v_th*Q_ei, 1.0e6);
+        nu = fmax(nu, anomalous_nu_floor());
     }
     @nogc void electron_collision_state(ref const(GasState) gs, GasModel gm, out double n_e, out double nu){
         gm.massf2numden(gs, number_density);
@@ -241,8 +243,23 @@ private:
         if (Q_ei < 0.0) Q_ei = 0.0;
         double v_th = sqrt(8.0*Boltzmann_constant*Te/(PI*_m_e));
         nu = fmax(n_neutral*v_th*Q_ea + n_e*v_th*Q_ei, 1.0e6);
+        nu = fmax(nu, anomalous_nu_floor());
     }
-    immutable double _m_e = 9.10938e-31; // electron mass [kg]
+    /*
+        config.electric_field_hall_beta_max > 0: an anomalous electron collision floor
+        nu >= e*|B_nom|/(m_e*beta_max), the usual effective-Hall-parameter closure for a
+        plasma above the electrothermal-instability threshold. It caps beta at beta_max
+        AND lowers sigma by the same factor, so (sigma, beta) stay consistent and
+        sigma_H = sigma*beta is unchanged where the cap is active. Uses the NOMINAL
+        (peak) field, so under a tapered magnet the local beta sits below beta_max.
+        0 (default) returns 0 and leaves nu exactly as before.
+    */
+    @nogc static double anomalous_nu_floor(){
+        immutable double bmax = GlobalConfig.electric_field_hall_beta_max;
+        if (bmax <= 0.0) return 0.0;
+        return elementary_charge*fabs(appliedBzNominal())/(_m_e*bmax);
+    }
+    immutable static double _m_e = 9.10938e-31; // electron mass [kg]
     size_t nsp;
     number[] number_density;
     int electron_idx;

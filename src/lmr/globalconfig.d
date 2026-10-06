@@ -1291,6 +1291,9 @@ final class GlobalConfig {
     // While deferred the field is left unsolved (NaN) so a NaN-aware UDF holds off the
     // MHD forcing -- lets Phase 1 stabilise the pure flow before the coupled field/MHD.
     shared static int electric_field_start_step = 0;
+    // Steady (Newton-Krylov) runs: solve the field only while start <= step < stop, then keep
+    // the last solution FROZEN in the cells. Default: never stop (the existing behaviour).
+    shared static int electric_field_stop_step = int.max;
     // Tensor (magnetised) conductivity in the potential solve: rotate the face
     // conductivity by the Hall parameter beta = e*Bz/(m_e*nu_e) supplied by the
     // conductivity model, so J = sigma_t (-grad phi + uxB) with
@@ -2181,6 +2184,7 @@ void set_config_for_core(JSONValue jsonData)
     mixin(update_int("electric_field_gmres_iters", "electric_field_gmres_iters"));
     mixin(update_bool("electric_field_freeze_in_linear_solve", "electric_field_freeze_in_linear_solve"));
     mixin(update_int("electric_field_start_step", "electric_field_start_step"));
+    mixin(update_int("electric_field_stop_step", "electric_field_stop_step"));
     mixin(update_bool("electric_field_hall_effect", "electric_field_hall_effect"));
     mixin(update_bool("solve_electric_field", "solve_electric_field"));
     mixin(update_string("conductivity_model_name", "conductivity_model_name"));

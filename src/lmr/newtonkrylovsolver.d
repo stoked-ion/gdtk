@@ -2727,7 +2727,10 @@ void computePreconditioner()
 {
     size_t nConserved = GlobalConfig.cqi.n;
 
-    if (GlobalConfig.solve_electric_field && nkStep >= GlobalConfig.electric_field_start_step){
+    // electric_field_stop_step: solve only while start <= nkStep < stop; afterwards the last
+    // solved field stays in the cells (frozen) for the rest of the run.
+    if (GlobalConfig.solve_electric_field && nkStep >= GlobalConfig.electric_field_start_step
+        && nkStep < GlobalConfig.electric_field_stop_step){
         eField.solve_efield(localFluidBlocks, false);
         eField.compute_electric_field_vector(localFluidBlocks);
         foreach (blk; parallel(localFluidBlocks, 1)) {
@@ -3702,6 +3705,7 @@ void evalResidualWorker(int ftl)
         //    Jacobian-vector evaluation (ftl != 0) -- reuse the base (ftl==0) field.
         if (GlobalConfig.solve_electric_field
             && nkStep >= GlobalConfig.electric_field_start_step
+            && nkStep < GlobalConfig.electric_field_stop_step      // frozen after the stop step
             && !(GlobalConfig.electric_field_freeze_in_linear_solve && ftl != 0)) {
             eField.solve_efield(localFluidBlocks, false);
             eField.compute_electric_field_vector(localFluidBlocks);

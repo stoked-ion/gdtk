@@ -242,7 +242,9 @@ refused in 3-D.
   CircuitElectrode.
 - **The face measure** is `face_measure(face)`: the length in 2-D, the area in 3-D.
 - **The 3-D MHD source must be the D source** (`config.mhd_source`, vector Ohm's law, J x B,
-  |J|^2/sigma). The X2 Lua UDFs form J from E_x, E_y only, and miss the Joule heating of
+  |J|^2/sigma). Where B = 0 it still applies the Joule heating of J = sigma E, as the 2-D
+  source does. Until bd932cac+1 it returned early and dropped it, which put a 9% F_x
+  error into an extrusion of a clipped-table case. The X2 Lua UDFs form J from E_x, E_y only, and miss the Joule heating of
   current along B. Zero the UDF's J x B and Joule and keep its radiation. The source box has
   `mhd_source_zmin/zmax` in 3-D.
 - **Field map:** `config.applied_B_map` is a planar CSV (x, y, Bx, By, a regular grid)
@@ -283,6 +285,11 @@ Verification (`Argon-ABLE/E3D/`, `E3D/ftest/`):
 - **Field-only:** harmonic 3-D converges at second order; the exact J = 0 field
   phi = (u x B).r is reproduced to 1e-13 with a tilted tensor, in every gate mode; shared
   memory and MPI agree to 7e-12 with cross terms on.
+- **Coupled skewed extrusion** (`build_rig3d.py ext --extrusion` vs the same 2-D case under
+  `LMR_EFIELD_GENERIC=1`). This is the new-rig geometry, 12 deg skew, a linear sheath at
+  150 V, beta cap 10. F_x is +113.7869 vs +113.7872 N/m (3e-6); phi agrees to 4e-6 max and
+  3e-8 median. The residue is lmr's 2-D vs 3-D cell-centre definitions on skewed cells.
+  This check found both zero-field bugs: the wall gate and the source.
 - **Skewed grids** (`E3D/ftest/gen_skew.py`, `gen_skew2d.py`): a TFI box whose y-walls
   diverge along x, like the new rig's expansion block.
   - 3-D: harmonic orders 1.86/1.95; tilted-tensor quadratic 1.53/1.81; B-along-z quadratic

@@ -127,9 +127,15 @@ import geom : Vector3;
     Vector3 Bv = appliedBVecAt(cell.pos[0].x.re, cell.pos[0].y.re, cell.pos[0].z.re);
     immutable double Bx = Bv.x.re, By = Bv.y.re, Bz = Bv.z.re;
     immutable double Bmag = sqrt(Bx*Bx + By*By + Bz*Bz);
-    if (Bmag == 0.0) return;
-    immutable double bx = Bx/Bmag, by = By/Bmag, bz = Bz/Bmag;
-    immutable bool hall = GlobalConfig.electric_field_hall_effect && (myConfig.conductivity_model !is null);
+    // Where B = 0 (e.g. a clipped table's zero zone) there is no Lorentz force, but current
+    // still flows, J = sigma E, and heats the gas -- as in the 2-D source. Returning early
+    // here dropped that Joule heating: a z-uniform 3-D extrusion then disagreed with its 2-D
+    // case by 9% in F_x through the hotter/cooler upstream gas. With B = 0 the tensor is
+    // isotropic, so any b-hat will do and beta = 0.
+    immutable double bx = (Bmag > 0.0) ? Bx/Bmag : 0.0, by = (Bmag > 0.0) ? By/Bmag : 0.0,
+                     bz = (Bmag > 0.0) ? Bz/Bmag : 1.0;
+    immutable bool hall = GlobalConfig.electric_field_hall_effect && (myConfig.conductivity_model !is null)
+        && Bmag > 0.0;
     auto coulomb = cast(CoulombConductivity) myConfig.conductivity_model;
     number sigma;
     number beta = 0.0;

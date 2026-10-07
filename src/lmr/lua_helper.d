@@ -33,6 +33,7 @@ import lmr.fluidblock;
 import lmr.fluidfvcell;
 import lmr.fvinterface;
 import lmr.globalconfig;
+import geom.elements.vector3 : Vector3;
 import lmr.globaldata;
 import lmr.luawrap.luaflowsolution;
 import lmr.luawrap.luaflowstate;
@@ -400,12 +401,21 @@ void pushFluidCellToTable(lua_State* L, int tblIdx, ref const(FluidFVCell) cell,
     lua_pushnumber(L, cell.electric_potential); lua_setfield(L, tblIdx, "phi");
     lua_pushnumber(L, cell.electric_field[0]); lua_setfield(L, tblIdx, "Ex_solved");
     lua_pushnumber(L, cell.electric_field[1]); lua_setfield(L, tblIdx, "Ey_solved");
+    lua_pushnumber(L, cell.electric_field[2]); lua_setfield(L, tblIdx, "Ez_solved");
     // The applied field AT THIS CELL. A UDF that builds J x B itself must use the same
     // value the field solver used, or its current will not match the solved potential;
     // with a tapered magnet (config.applied_B_ramp) a hard-coded constant in the UDF is
     // wrong everywhere outside the flat region. Equals config.applied_Bz when no taper
     // is configured.
-    lua_pushnumber(L, appliedBzAt(cell.pos[0].x.re)); lua_setfield(L, tblIdx, "Bz_applied");
+    if (GlobalConfig.dimensions == 3) {
+        // 3-D: the full applied field vector (field map, or applied_B_direction).
+        Vector3 Bv = appliedBVecAt(cell.pos[0].x.re, cell.pos[0].y.re, cell.pos[0].z.re);
+        lua_pushnumber(L, Bv.x.re); lua_setfield(L, tblIdx, "Bx_applied");
+        lua_pushnumber(L, Bv.y.re); lua_setfield(L, tblIdx, "By_applied");
+        lua_pushnumber(L, Bv.z.re); lua_setfield(L, tblIdx, "Bz_applied");
+    } else {
+        lua_pushnumber(L, appliedBzAt(cell.pos[0].x.re)); lua_setfield(L, tblIdx, "Bz_applied");
+    }
     // The Hall parameter the field solve used for this cell -- a diagnostic; see
     // FluidFVCell.hall_beta for why a steady source term should not be built from it.
     lua_pushnumber(L, cell.hall_beta); lua_setfield(L, tblIdx, "hall_beta");

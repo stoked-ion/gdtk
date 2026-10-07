@@ -41,6 +41,7 @@ import lmr.efield.efieldconductivity : CoulombConductivity;
 import lmr.fluidfvcell;
 import lmr.globalconfig;
 import lmr.globaldata : SimState;
+import geom : Vector3;
 
 /// Smoothstep ramp on the step counter; 1 when no ramp is configured. The steady solver
 /// passes t = -1, so a ramp on physical time would be zero throughout; ramp on steps.
@@ -69,6 +70,7 @@ import lmr.globaldata : SimState;
     if (isNaN(Exs) || isNaN(Eys)) return;   // field not solved yet
     immutable double factor = mhdSourceRampFactor();
     if (factor == 0.0) return;
+    if (GlobalConfig.dimensions == 3) { addMHDSource3D(cell, myConfig, factor); return; }
 
     auto gm = myConfig.gmodel;
     auto cqi = myConfig.cqi;
@@ -100,6 +102,62 @@ import lmr.globaldata : SimState;
 
     cell.Q[cqi.xMom] += factor*Fx;
     cell.Q[cqi.yMom] += factor*Fy;
+    cell.Q[cqi.totEnergy] += factor*(Qj + W);
+    if (cqi.n_modes > 0) cell.Q[cqi.modes + cqi.n_modes - 1] += factor*Qj;
+}
+
+/**
+ * The 3-D source: the same generalised Ohm's law for a field of any direction,
+ *   J = sigma (b.E') b + sigma_P (E' - (b.E') b) + sigma_H (b x E'),   E' = E + u x B,
+ * which is the 2-D form for b = z, plus the one new term: conduction ALONG B is the full
+ * sigma, not sigma_P. Sources J x B, |J|^2/sigma (= J.E' for this tensor) to the electrons,
+ * and |J|^2/sigma + u.(J x B) to the total energy. B from appliedBVecAt (field map or
+ * applied_B_direction).
+ */
+@nogc void addMHDSource3D(FluidFVCell cell, LocalConfig myConfig, double factor)
+{
+    immutable double Ezs = cell.electric_field[2];
+    if (isNaN(Ezs)) return;
+    // z-limits of the source box (3-D): a guard on the cell layers touching electrodes that
+    // lie on the z-walls. Default unbounded.
+    immutable double zc = cell.pos[0].z.re;
+    if (zc < GlobalConfig.mhd_source_zmin || zc > GlobalConfig.mhd_source_zmax) return;
+    auto gm = myConfig.gmodel;
+    auto cqi = myConfig.cqi;
+    Vector3 Bv = appliedBVecAt(cell.pos[0].x.re, cell.pos[0].y.re, cell.pos[0].z.re);
+    immutable double Bx = Bv.x.re, By = Bv.y.re, Bz = Bv.z.re;
+    immutable double Bmag = sqrt(Bx*Bx + By*By + Bz*Bz);
+    if (Bmag == 0.0) return;
+    immutable double bx = Bx/Bmag, by = By/Bmag, bz = Bz/Bmag;
+    immutable bool hall = GlobalConfig.electric_field_hall_effect && (myConfig.conductivity_model !is null);
+    auto coulomb = cast(CoulombConductivity) myConfig.conductivity_model;
+    number sigma;
+    number beta = 0.0;
+    if (GlobalConfig.mhd_source_differentiate_sigma && coulomb !is null) {
+        sigma = coulomb.sigma_z(cell.fs.gas, gm);
+        if (hall) beta = coulomb.hall_beta_z(cell.fs.gas, gm, Bmag);
+    } else {
+        sigma = cell.fs.gas.sigma;
+        if (hall) beta = myConfig.conductivity_model.hall_beta(cell.fs.gas, gm, Bmag);
+    }
+    if (sigma.re < 1.0e-10) sigma = 1.0e-10;
+    number ux = cell.fs.vel.x, uy = cell.fs.vel.y, uz = cell.fs.vel.z;
+    // physical E = -grad(phi); E' = E + u x B
+    number epx = -cell.electric_field[0] + (uy*Bz - uz*By);
+    number epy = -cell.electric_field[1] + (uz*Bx - ux*Bz);
+    number epz = -Ezs                    + (ux*By - uy*Bx);
+    number obb = 1.0/(1.0 + beta*beta);
+    number sP = sigma*obb, sH = sigma*beta*obb;
+    number be = bx*epx + by*epy + bz*epz;
+    number Jx = sigma*be*bx + sP*(epx - be*bx) + sH*(by*epz - bz*epy);
+    number Jy = sigma*be*by + sP*(epy - be*by) + sH*(bz*epx - bx*epz);
+    number Jz = sigma*be*bz + sP*(epz - be*bz) + sH*(bx*epy - by*epx);
+    number Fx = Jy*Bz - Jz*By, Fy = Jz*Bx - Jx*Bz, Fz = Jx*By - Jy*Bx;
+    number Qj = (Jx*Jx + Jy*Jy + Jz*Jz)/sigma;
+    number W = ux*Fx + uy*Fy + uz*Fz;
+    cell.Q[cqi.xMom] += factor*Fx;
+    cell.Q[cqi.yMom] += factor*Fy;
+    cell.Q[cqi.zMom] += factor*Fz;
     cell.Q[cqi.totEnergy] += factor*(Qj + W);
     if (cqi.n_modes > 0) cell.Q[cqi.modes + cqi.n_modes - 1] += factor*Qj;
 }

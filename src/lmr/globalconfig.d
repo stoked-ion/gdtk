@@ -24,7 +24,7 @@ import std.conv;
 import std.file;
 import std.format;
 import std.json;
-import std.math : tanh;
+import std.math : tanh, floor, fabs, sqrt, lround;
 import std.stdio;
 import std.string;
 import std.typecons;
@@ -1252,6 +1252,8 @@ final class GlobalConfig {
     shared static double mhd_source_xmax = 1.0e300;
     shared static double mhd_source_ymin = -1.0e300;
     shared static double mhd_source_ymax = 1.0e300;
+    shared static double mhd_source_zmin = -1.0e300;   // 3-D only
+    shared static double mhd_source_zmax = 1.0e300;
     // Direction of the applied magnetic field for the electric-field solve. "z" (default):
     // out of plane, the established path. "y": IN-PLANE, along the wall normal -- the planar
     // analogue of a closed-drift (Hall-thruster) channel: u x B is then out of plane, the
@@ -1279,7 +1281,35 @@ final class GlobalConfig {
     shared static double[APPLIED_B_TAB_MAX] applied_B_tab_B;
     shared static int applied_B_tab_n = 0;
     shared static string applied_B_table = "";
+    // 2-D FIELD MAP for 3-D runs: a planar magnetostatic solution (e.g. FEMM) on a regular
+    // grid, extruded along the axis the map does not contain. CSV columns x, y, Bx, By
+    // (header and '#' lines ignored), any row order, a complete rectangular grid.
+    //   applied_B_map_plane  "xz" (default): the map's (x, y) are the simulation's (x, z),
+    //                        its (Bx, By) the simulation's (B_x, B_z) -- the X2 magnet, whose
+    //                        gap is across the duct depth; "xy": (x, y) -> (x, y), (B_x, B_y).
+    //   simulation coordinate = applied_B_map_scale*map + offset  (scale 1e-3 for mm)
+    //   applied_B_map_field_scale multiplies B.  Outside the map the edge value is used.
+    //   applied_B_map_clip_reversed = true sets a negative across-gap component to zero
+    //   (the 2-D tabulated field needed the same treatment: sigma_H of both signs).
+    // Leaving applied_B_map empty takes exactly the pre-existing path. 3-D only.
+    shared static string applied_B_map = "";
+    shared static string applied_B_map_plane = "xz";
+    shared static double applied_B_map_scale = 1.0;
+    shared static double applied_B_map_x_offset = 0.0;
+    shared static double applied_B_map_y_offset = 0.0;
+    shared static double applied_B_map_field_scale = 1.0;
+    shared static bool applied_B_map_clip_reversed = false;
+    shared static int applied_B_map_nx = 0, applied_B_map_ny = 0;
+    shared static double applied_B_map_x0 = 0.0, applied_B_map_dx = 1.0;
+    shared static double applied_B_map_y0 = 0.0, applied_B_map_dy = 1.0;
+    shared static double applied_B_map_maxB = 0.0;
     shared static int electric_field_gmres_iters = -1;
+    // Restarted GMRES(m) for the field solve: m > 0 rebuilds the Krylov basis every m
+    // iterations (memory (m+1)*N instead of iters^2 + iters*N), converging on the
+    // preconditioned residual relative to the preconditioned rhs, below gmres_rtol.
+    // 0 (default) keeps the original unrestarted solver exactly.
+    shared static int electric_field_gmres_restart = 0;
+    shared static double electric_field_gmres_rtol = 1.0e-10;
     // Freeze the solved field through the Newton-Krylov linear solve: solve it at the
     // base residual (ftl==0) and reuse it for the Frechet/Jacobian-vector evaluations
     // (ftl!=0). Cuts the field solves per Newton step from ~max_linear_solver_iterations
@@ -1299,6 +1329,18 @@ final class GlobalConfig {
     // (above the electrothermal-instability threshold the classical beta is not attained).
     // 0 = off (the existing behaviour).
     shared static double electric_field_hall_beta_max = 0.0;
+    // Verification conductivity model "constant_tensor": uniform sigma and a uniform Hall
+    // parameter (sign of the local B), so the 3-D tensor operator can be checked against
+    // exact solutions. Not a physical model.
+    shared static double electric_field_test_sigma = 1.0;
+    shared static double electric_field_test_beta = 0.0;
+    // Generic (3-D) field solve: the Hall gate on boundary and wall-layer faces --
+    // "legacy" (the 2-D central scheme: unmagnetised sigma there, dphi/dn = 0 walls),
+    // "rotation" (drop only the Hall rotation; tensor J.n = 0 walls) or "none" -- and
+    // whether to add the cross-diffusion (edge-neighbour) columns. Cross-diffusion is on
+    // automatically with a field map; force it with electric_field_cross_terms = true.
+    shared static string electric_field_hall_gate = "legacy";
+    shared static bool electric_field_cross_terms = false;
     // Tensor (magnetised) conductivity in the potential solve: rotate the face
     // conductivity by the Hall parameter beta = e*Bz/(m_e*nu_e) supplied by the
     // conductivity model, so J = sigma_t (-grad phi + uxB) with
@@ -2174,24 +2216,45 @@ void set_config_for_core(JSONValue jsonData)
     mixin(update_double("mhd_source_xmax", "mhd_source_xmax"));
     mixin(update_double("mhd_source_ymin", "mhd_source_ymin"));
     mixin(update_double("mhd_source_ymax", "mhd_source_ymax"));
+    mixin(update_double("mhd_source_zmin", "mhd_source_zmin"));
+    mixin(update_double("mhd_source_zmax", "mhd_source_zmax"));
     mixin(update_string("applied_B_direction", "applied_B_direction"));
-    if (cfg.applied_B_direction != "z" && cfg.applied_B_direction != "y")
-        throw new Error("config.applied_B_direction must be \"z\" or \"y\", got: " ~ cfg.applied_B_direction);
-    if (cfg.applied_B_direction == "y" && cfg.electric_field_hall_effect)
-        throw new Error("config.applied_B_direction = \"y\" requires electric_field_hall_effect = false: "
-                        ~ "the in-plane mode carries its own (diagonal) Hall tensor, and the B_z Hall machinery must stay off.");
+    if (cfg.applied_B_direction != "z" && cfg.applied_B_direction != "y" && cfg.applied_B_direction != "x")
+        throw new Error("config.applied_B_direction must be \"x\", \"y\" or \"z\", got: " ~ cfg.applied_B_direction);
+    if (cfg.applied_B_direction == "x" && cfg.dimensions != 3)
+        throw new Error("config.applied_B_direction = \"x\" is available in 3-D only.");
     mixin(update_double("mhd_source_yguard_xmax", "mhd_source_yguard_xmax"));
     mixin(update_int("mhd_source_ramp_start", "mhd_source_ramp_start"));
     mixin(update_int("mhd_source_ramp_steps", "mhd_source_ramp_steps"));
     mixin(update_bool("mhd_source_differentiate_sigma", "mhd_source_differentiate_sigma"));
     mixin(update_string("applied_B_table", "applied_B_table"));
     loadAppliedBTable();
+    mixin(update_string("applied_B_map", "applied_B_map"));
+    mixin(update_string("applied_B_map_plane", "applied_B_map_plane"));
+    mixin(update_double("applied_B_map_scale", "applied_B_map_scale"));
+    mixin(update_double("applied_B_map_x_offset", "applied_B_map_x_offset"));
+    mixin(update_double("applied_B_map_y_offset", "applied_B_map_y_offset"));
+    mixin(update_double("applied_B_map_field_scale", "applied_B_map_field_scale"));
+    mixin(update_bool("applied_B_map_clip_reversed", "applied_B_map_clip_reversed"));
+    loadAppliedBMap();
     mixin(update_int("electric_field_gmres_iters", "electric_field_gmres_iters"));
+    mixin(update_int("electric_field_gmres_restart", "electric_field_gmres_restart"));
+    mixin(update_double("electric_field_gmres_rtol", "electric_field_gmres_rtol"));
     mixin(update_bool("electric_field_freeze_in_linear_solve", "electric_field_freeze_in_linear_solve"));
     mixin(update_int("electric_field_start_step", "electric_field_start_step"));
     mixin(update_int("electric_field_stop_step", "electric_field_stop_step"));
     mixin(update_double("electric_field_hall_beta_max", "electric_field_hall_beta_max"));
+    mixin(update_double("electric_field_test_sigma", "electric_field_test_sigma"));
+    mixin(update_double("electric_field_test_beta", "electric_field_test_beta"));
+    mixin(update_string("electric_field_hall_gate", "electric_field_hall_gate"));
+    mixin(update_bool("electric_field_cross_terms", "electric_field_cross_terms"));
     mixin(update_bool("electric_field_hall_effect", "electric_field_hall_effect"));
+    // The 2-D in-plane ("y") mode is the closed-drift model with its own diagonal tensor and
+    // the B_z Hall machinery off. (This check used to sit before the Hall flag was read, so
+    // it could never fire.) In 3-D the general field-direction tensor handles any axis.
+    if (cfg.applied_B_direction == "y" && cfg.electric_field_hall_effect && cfg.dimensions == 2)
+        throw new Error("config.applied_B_direction = \"y\" requires electric_field_hall_effect = false in 2-D: "
+                        ~ "the in-plane mode carries its own (diagonal) Hall tensor, and the B_z Hall machinery must stay off.");
     mixin(update_bool("solve_electric_field", "solve_electric_field"));
     mixin(update_string("conductivity_model_name", "conductivity_model_name"));
     // external_circuit arrives as a JSON object; keep it as text for ElectricField.
@@ -3016,6 +3079,7 @@ double appliedBzAt(double x)
 @nogc
 double appliedBzNominal()
 {
+    if (GlobalConfig.applied_B_map_nx > 0) return GlobalConfig.applied_B_map_maxB;
     int n = GlobalConfig.applied_B_tab_n;
     if (n <= 0) return GlobalConfig.applied_Bz;
     auto bs = cast(double[])GlobalConfig.applied_B_tab_B[0 .. n];
@@ -3066,4 +3130,106 @@ void loadAppliedBTable()
     }
     if (n < 2) throw new Error("applied_B_table needs at least two points: " ~ fname);
     GlobalConfig.applied_B_tab_n = n;
+}
+
+// Field-map component arrays, filled once by loadAppliedBMap() and then read-only.
+// b1 is the axial (simulation x) component, b2 the map's second component (simulation z for
+// plane "xz", y for "xy"); index [j*nx + i] with i along x and j along the map's y.
+__gshared double[] appliedBMapB1, appliedBMapB2;
+
+/**
+ * The applied magnetic field VECTOR at a point. Used by the dimension-generic field solve
+ * (3-D) and the 3-D MHD source; the 2-D solver keeps calling appliedBzAt.
+ *
+ * With a field map loaded (3-D only) the planar map is bilinearly interpolated and extruded
+ * along the axis it lacks. Otherwise the field points along applied_B_direction with the
+ * axial magnitude profile of appliedBzAt (uniform, tanh window or 1-D table).
+ */
+@nogc
+Vector3 appliedBVecAt(double x, double y, double z)
+{
+    if (GlobalConfig.applied_B_map_nx > 0) {
+        immutable bool xz = (GlobalConfig.applied_B_map_plane == "xz");
+        immutable int nx = GlobalConfig.applied_B_map_nx, ny = GlobalConfig.applied_B_map_ny;
+        double s = (x - GlobalConfig.applied_B_map_x_offset)/GlobalConfig.applied_B_map_scale;
+        double t = ((xz ? z : y) - GlobalConfig.applied_B_map_y_offset)/GlobalConfig.applied_B_map_scale;
+        double fi = (s - GlobalConfig.applied_B_map_x0)/GlobalConfig.applied_B_map_dx;
+        double fj = (t - GlobalConfig.applied_B_map_y0)/GlobalConfig.applied_B_map_dy;
+        if (fi < 0.0) fi = 0.0; if (fi > nx - 1) fi = nx - 1;
+        if (fj < 0.0) fj = 0.0; if (fj > ny - 1) fj = ny - 1;
+        int i0 = cast(int) floor(fi); if (i0 > nx - 2) i0 = nx - 2;
+        int j0 = cast(int) floor(fj); if (j0 > ny - 2) j0 = ny - 2;
+        double wi = fi - i0, wj = fj - j0;
+        double bilin(const double[] b) {
+            return (1.0-wi)*(1.0-wj)*b[j0*nx + i0] + wi*(1.0-wj)*b[j0*nx + i0 + 1]
+                 + (1.0-wi)*wj*b[(j0+1)*nx + i0] + wi*wj*b[(j0+1)*nx + i0 + 1];
+        }
+        double b1 = bilin(appliedBMapB1), b2 = bilin(appliedBMapB2);
+        return xz ? Vector3(b1, 0.0, b2) : Vector3(b1, b2, 0.0);
+    }
+    double B = appliedBzAt(x);
+    if (GlobalConfig.applied_B_direction == "x") return Vector3(B, 0.0, 0.0);
+    if (GlobalConfig.applied_B_direction == "y") return Vector3(0.0, B, 0.0);
+    return Vector3(0.0, 0.0, B);
+}
+
+/**
+ * Read config.applied_B_map (see the GlobalConfig fields for the conventions).
+ */
+void loadAppliedBMap()
+{
+    import std.stdio: File;
+    import std.string: strip, split, startsWith;
+    import std.conv: to;
+    import std.file: exists;
+    import std.algorithm: sort, uniq, countUntil;
+    import std.array: array;
+    GlobalConfig.applied_B_map_nx = 0;
+    string fname = GlobalConfig.applied_B_map;
+    if (fname.length == 0) return;
+    if (GlobalConfig.dimensions != 3)
+        throw new Error("config.applied_B_map is a 3-D feature (use applied_B_table for a 2-D profile).");
+    if (GlobalConfig.applied_B_map_plane != "xz" && GlobalConfig.applied_B_map_plane != "xy")
+        throw new Error("config.applied_B_map_plane must be \"xz\" or \"xy\".");
+    if (!exists(fname)) throw new Error("applied_B_map file not found: " ~ fname);
+    double[] px, py, pb1, pb2;
+    foreach (line; File(fname, "r").byLine()) {
+        auto t = strip(line.idup);
+        if (t.length == 0 || t.startsWith("#")) continue;
+        auto parts = split(t, ",");
+        if (parts.length < 4) continue;
+        double a, b, c, d;
+        try { a = to!double(strip(parts[0])); b = to!double(strip(parts[1]));
+              c = to!double(strip(parts[2])); d = to!double(strip(parts[3])); }
+        catch (Exception e) { continue; }   // header line
+        px ~= a; py ~= b; pb1 ~= c; pb2 ~= d;
+    }
+    auto xs = px.dup.sort.uniq.array;
+    auto ys = py.dup.sort.uniq.array;
+    immutable int nx = cast(int) xs.length, ny = cast(int) ys.length;
+    if (nx < 2 || ny < 2 || px.length != cast(size_t) nx*ny)
+        throw new Error(format("applied_B_map must be a complete rectangular grid: %d points, %d x %d unique",
+                               px.length, nx, ny));
+    double dx = (xs[$-1] - xs[0])/(nx - 1), dy = (ys[$-1] - ys[0])/(ny - 1);
+    foreach (i; 1 .. nx) if (fabs((xs[i] - xs[i-1]) - dx) > 1.0e-6*fabs(dx))
+        throw new Error("applied_B_map x spacing must be uniform: " ~ fname);
+    foreach (j; 1 .. ny) if (fabs((ys[j] - ys[j-1]) - dy) > 1.0e-6*fabs(dy))
+        throw new Error("applied_B_map y spacing must be uniform: " ~ fname);
+    appliedBMapB1 = new double[nx*ny]; appliedBMapB2 = new double[nx*ny];
+    bool[] seen = new bool[nx*ny];
+    immutable double fs = GlobalConfig.applied_B_map_field_scale;
+    double maxB = 0.0;
+    foreach (k; 0 .. px.length) {
+        int i = cast(int) lround((px[k] - xs[0])/dx), j = cast(int) lround((py[k] - ys[0])/dy);
+        double b1 = fs*pb1[k], b2 = fs*pb2[k];
+        if (GlobalConfig.applied_B_map_clip_reversed && b2 < 0.0) b2 = 0.0;
+        appliedBMapB1[j*nx + i] = b1; appliedBMapB2[j*nx + i] = b2; seen[j*nx + i] = true;
+        double m = sqrt(b1*b1 + b2*b2); if (m > maxB) maxB = m;
+    }
+    foreach (v; seen) if (!v) throw new Error("applied_B_map has missing grid points: " ~ fname);
+    GlobalConfig.applied_B_map_x0 = xs[0]; GlobalConfig.applied_B_map_dx = dx;
+    GlobalConfig.applied_B_map_y0 = ys[0]; GlobalConfig.applied_B_map_dy = dy;
+    GlobalConfig.applied_B_map_ny = ny;
+    GlobalConfig.applied_B_map_maxB = maxB;
+    GlobalConfig.applied_B_map_nx = nx;   // last: nx > 0 is what switches the map on
 }

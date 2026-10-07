@@ -579,25 +579,31 @@ public:
             if (!left_cell.is_interior_to_domain && right_cell.is_interior_to_domain) {
                 fs.electric_field[0] = right_cell.electric_field[0];
                 fs.electric_field[1] = right_cell.electric_field[1];
+            fs.electric_field[2] = right_cell.electric_field[2];
             }
             else if (left_cell.is_interior_to_domain && !right_cell.is_interior_to_domain) {
                 fs.electric_field[0] = left_cell.electric_field[0];
                 fs.electric_field[1] = left_cell.electric_field[1];
+            fs.electric_field[2] = left_cell.electric_field[2];
             }
             else {
                 if (isNaN(left_cell.electric_field[0])) {
                     fs.electric_field[0] = right_cell.electric_field[0];
                     fs.electric_field[1] = right_cell.electric_field[1];
+                    fs.electric_field[2] = right_cell.electric_field[2];
                 }
                 else if (isNaN(right_cell.electric_field[0])) {
                     fs.electric_field[0] = left_cell.electric_field[0];
                     fs.electric_field[1] = left_cell.electric_field[1];
+                    fs.electric_field[2] = left_cell.electric_field[2];
                 }
                 else {
                     fs.electric_field[0] = 0.5 * (left_cell.electric_field[0] +
                                                right_cell.electric_field[0]);
                     fs.electric_field[1] = 0.5 * (left_cell.electric_field[1] +
-                                               right_cell.electric_field[1]);               
+                                               right_cell.electric_field[1]);
+                    fs.electric_field[2] = 0.5 * (left_cell.electric_field[2] +
+                                               right_cell.electric_field[2]);
                 }
             }
 
@@ -605,10 +611,12 @@ public:
         else if (left_cell && !right_cell) {
             fs.electric_field[0] = left_cell.electric_field[0];
             fs.electric_field[1] = left_cell.electric_field[1];
+            fs.electric_field[2] = left_cell.electric_field[2];
         }
         else if (!left_cell && right_cell) {
             fs.electric_field[0] = right_cell.electric_field[0];
             fs.electric_field[1] = right_cell.electric_field[1];
+            fs.electric_field[2] = right_cell.electric_field[2];
         }
         return;
         // throw new Exception("Oops! This face does not have at least one cell attached.");

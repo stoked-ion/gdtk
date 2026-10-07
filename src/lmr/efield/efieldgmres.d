@@ -18,6 +18,7 @@ import geom;
 import nm.smla : SMatrix, decompILU0, iluApply = solve;
 
 import lmr.efield.efieldbc;
+import lmr.globalconfig : GlobalConfig;
 import lmr.efield.efieldexchange;
 import lmr.fvinterface;
 
@@ -44,7 +45,7 @@ class GMResFieldSolver {
         if (!ilu_built) {
             Mfact = new SMatrix!double();
             foreach(i; 0 .. n){
-                size_t[5] cols; double[5] vals; int cnt = 0;
+                size_t[19] cols; double[19] vals; int cnt = 0;   // up to 19 bands (3-D with cross-diffusion)
                 foreach(j; 0 .. nb){
                     int jj = Ai[i*nb + j];
                     if (jj < 0 || jj >= n) continue; // drop empty + external/MPI columns
@@ -64,7 +65,7 @@ class GMResFieldSolver {
             // build above, since Ai is constant), overwriting the previous factors.
             size_t pos = 0;
             foreach(i; 0 .. n){
-                size_t[5] cols; double[5] vals; int cnt = 0;
+                size_t[19] cols; double[19] vals; int cnt = 0;   // up to 19 bands (3-D with cross-diffusion)
                 foreach(j; 0 .. nb){
                     int jj = Ai[i*nb + j];
                     if (jj < 0 || jj >= n) continue;
@@ -210,6 +211,16 @@ class GMResFieldSolver {
     
             @author: Nick Gibbons
         */
+        // LMR_EFIELD_VERBOSE=1 reports every field solve (iterations, true residual).
+        static bool vforce = false, vchecked = false;
+        if (!vchecked) { import std.process : environment; vforce = (environment.get("LMR_EFIELD_VERBOSE", "0") == "1"); vchecked = true; }
+        if (vforce) verbose = GlobalConfig.is_master_task;
+        // Restarted GMRES(m) when configured (electric_field_gmres_restart > 0); the
+        // original unrestarted solver below otherwise, unchanged.
+        if (GlobalConfig.electric_field_gmres_restart > 0) {
+            solve_restarted(matrix_size, nbands, A, Ai, b, x0, xf, nmax_iter, verbose);
+            return;
+        }
         // Allocate the reusable work buffers once (sizes are constant across solves).
         // On subsequent solves these are reused as-is; the per-solve resets below
         // (QT, R, xold, q) re-initialise what the algorithm reads, and h/c/s/y/xnew/
@@ -330,11 +341,137 @@ class GMResFieldSolver {
             if (residual < tol*(vector_norm(xnew, matrix_size) + 1.0)) break;
         }
         if (residual >= tol*(vector_norm(xnew, matrix_size) + 1.0)) success=false;
+        if (vforce) {
+            // the TRUE preconditioned residual of the returned iterate, relative to M^{-1} b
+            banded_matrix_vector_product(matrix_size, nbands, A, Ai, xnew, y);
+            foreach(i; 0 .. matrix_size) y[i] = b[i] - y[i];
+            if (use_ilu) iluApply(Mfact, y);
+            double rr_ = vector_norm(y, matrix_size);
+            foreach(i; 0 .. matrix_size) y[i] = b[i];
+            if (use_ilu) iluApply(Mfact, y);
+            double bb_ = vector_norm(y, matrix_size);
+            if (verbose) writefln("    [efield/gmres] unrestarted: iters=%d  |dx| criterion met=%s  true rel. residual=%.3e",
+                                  k, success, rr_/bb_);
+        }
         if (verbose) writefln("    Solve Complete: status=%s  iters=%d/%d  residual=%e/%e", success, k, nmax_iter, residual, tol);
         if (success==false) throw new Error("BGMRes failed to converge!");
 
         xf[] = xnew[];
         return;
+    }
+
+    /*
+        Restarted, left-preconditioned GMRES(m): Arnoldi with modified Gram-Schmidt and
+        Givens rotations, the Krylov basis rebuilt every m iterations.
+
+        Why. The original solver keeps the WHOLE Krylov history: its memory grows as
+        iterations^2 + iterations*N, and it forms the full solution vector at every
+        iteration, so its work grows as iterations^2 * N. Fine for a 2-D field of a few
+        thousand cells that converges in tens of iterations; not for a 3-D field of 10^5-10^6
+        cells. Here memory is (m+1)*N and the solution is formed once per cycle.
+
+        Convergence: the preconditioned residual estimate |g_{j+1}| (exact in exact
+        arithmetic) relative to the preconditioned right-hand side, below
+        config.electric_field_gmres_rtol. nmax_iter caps the TOTAL iterations.
+    */
+    private double[] Vr, wr, rr, Hr, cr, sr, gr, yr, hproj;
+    private int vr_m = -1, vr_n = -1;
+
+    void solve_restarted(int n, int nb, double[] A, int[] Ai, double[] b, double[] x0,
+                         double[] xf, int nmax_iter, bool verbose)
+    {
+        immutable int m = GlobalConfig.electric_field_gmres_restart;
+        immutable double rtol = GlobalConfig.electric_field_gmres_rtol;
+        if (vr_m != m || vr_n != n) {
+            Vr.length = (m+1)*n; wr.length = n; rr.length = n;
+            Hr.length = (m+1)*m; cr.length = m; sr.length = m; gr.length = m+1; yr.length = m; hproj.length = m+1;
+            vr_m = m; vr_n = n;
+        }
+        xf[] = x0[];
+        // preconditioned right-hand side norm, the reference for the relative tolerance
+        rr[] = b[];
+        if (use_ilu) iluApply(Mfact, rr);
+        double bnorm = vector_norm(rr, n);
+        if (bnorm == 0.0) { xf[] = 0.0; return; }
+        int total = 0;
+        double resid = 1.0e300;
+        bool converged = false;
+        while (total < nmax_iter) {
+            banded_matrix_vector_product(n, nb, A, Ai, xf, rr);
+            foreach (i; 0 .. n) rr[i] = b[i] - rr[i];
+            if (use_ilu) iluApply(Mfact, rr);
+            double beta = vector_norm(rr, n);
+            resid = beta;
+            if (beta <= rtol*bnorm) { converged = true; break; }
+            foreach (i; 0 .. n) Vr[i] = rr[i]/beta;
+            gr[] = 0.0; gr[0] = beta;
+            int jj = 0;
+            foreach (j; 0 .. m) {
+                double[] vj = Vr[j*n .. (j+1)*n];
+                banded_matrix_vector_product(n, nb, A, Ai, vj, wr);
+                if (use_ilu) iluApply(Mfact, wr);
+                // Classical Gram-Schmidt with one reorthogonalisation (CGS2): all j+1
+                // projections in ONE global reduction per pass (2 passes), instead of
+                // modified Gram-Schmidt's j+1 sequential reductions. Same orthogonality in
+                // practice; O(iterations) MPI_Allreduce calls per solve instead of
+                // O(iterations^2), which is what limits the field solve at many ranks.
+                foreach (i; 0 .. j+1) Hr[i*m + j] = 0.0;
+                foreach (pass; 0 .. 2) {
+                    foreach (i; 0 .. j+1) {
+                        double sum = 0.0;
+                        double[] vi = Vr[i*n .. (i+1)*n];
+                        foreach (p; 0 .. n) sum += wr[p]*vi[p];
+                        hproj[i] = sum;
+                    }
+                    version(mpi_parallel) {
+                        MPI_Allreduce(MPI_IN_PLACE, hproj.ptr, j+1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+                    }
+                    foreach (i; 0 .. j+1) {
+                        double hij = hproj[i];
+                        Hr[i*m + j] += hij;
+                        double[] vi = Vr[i*n .. (i+1)*n];
+                        foreach (p; 0 .. n) wr[p] -= hij*vi[p];
+                    }
+                }
+                double hn = vector_norm(wr, n);
+                Hr[(j+1)*m + j] = hn;
+                if (hn != 0.0) foreach (p; 0 .. n) Vr[(j+1)*n + p] = wr[p]/hn;
+                // apply the previous rotations to the new column, then form this one
+                foreach (i; 0 .. j) {
+                    double t1 = Hr[i*m + j], t2 = Hr[(i+1)*m + j];
+                    Hr[i*m + j]     =  cr[i]*t1 + sr[i]*t2;
+                    Hr[(i+1)*m + j] = -sr[i]*t1 + cr[i]*t2;
+                }
+                double a1 = Hr[j*m + j], a2 = Hr[(j+1)*m + j];
+                double rho = sqrt(a1*a1 + a2*a2);
+                cr[j] = (rho == 0.0) ? 1.0 : a1/rho;
+                sr[j] = (rho == 0.0) ? 0.0 : a2/rho;
+                Hr[j*m + j] = rho; Hr[(j+1)*m + j] = 0.0;
+                gr[j+1] = -sr[j]*gr[j];
+                gr[j]   =  cr[j]*gr[j];
+                jj = j + 1; total++;
+                resid = fabs(gr[j+1]);
+                if (resid <= rtol*bnorm || hn == 0.0 || total >= nmax_iter) break;
+            }
+            // y = H^{-1} g (upper triangular, jj x jj), x += V y
+            for (int i = jj-1; i >= 0; i--) {
+                double sum = gr[i];
+                foreach (q2; i+1 .. jj) sum -= Hr[i*m + q2]*yr[q2];
+                yr[i] = (Hr[i*m + i] != 0.0) ? sum/Hr[i*m + i] : 0.0;
+            }
+            foreach (i; 0 .. jj) {
+                double yi = yr[i];
+                foreach (p; 0 .. n) xf[p] += yi*Vr[i*n + p];
+            }
+            if (resid <= rtol*bnorm) { converged = true; break; }
+        }
+        if (verbose) writefln("    Restarted GMRES(%d): converged=%s  iters=%d/%d  rel. residual=%.3e (target %.1e)",
+                              m, converged, total, nmax_iter, resid/bnorm, rtol);
+        if (!converged) {
+            writefln("    Restarted GMRES(%d) did NOT converge: %d iterations, rel. residual %.3e (target %.1e)",
+                     m, total, resid/bnorm, rtol);
+            throw new Error("BGMRes failed to converge!");
+        }
     }
 
 private:

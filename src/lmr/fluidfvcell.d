@@ -153,7 +153,7 @@ public:
 
     // Electromagnetic Field Variables
     double electric_potential;
-    double[2] electric_field;
+    double[3] electric_field;   // +grad(phi); [2] is zero in 2-D
     // The cell-centre Hall parameter the FIELD SOLVE itself used on its last solve
     // (filled in ElectricField.computeHallVertexField), exposed to the UDF as
     // cell.hall_beta. A DIAGNOSTIC: compare it with a UDF's own beta to catch drift

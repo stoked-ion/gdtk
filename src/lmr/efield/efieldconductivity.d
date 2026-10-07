@@ -53,6 +53,22 @@ class ConstantConductivity : ConductivityModel{
     @nogc final double hall_beta(ref const(GasState) gs, GasModel gm, double Bz){ return 0.0; }
 }
 
+class ConstantTensorConductivity : ConductivityModel{
+/*
+    Verification model: sigma = config.electric_field_test_sigma everywhere and a Hall
+    parameter config.electric_field_test_beta, signed by the field it is given (zero where
+    B = 0). Lets the tensor operator be checked against exact solutions, e.g. the J = 0
+    field phi = (u x B).r for uniform u and B. Not a physical model.
+*/
+    this() {}
+    @nogc final number opCall(ref const(GasState) gs, const Vector3 pos, GasModel gm){
+        return to!number(GlobalConfig.electric_field_test_sigma);
+    }
+    @nogc final double hall_beta(ref const(GasState) gs, GasModel gm, double Bz){
+        if (Bz == 0.0) return 0.0;
+        return (Bz > 0.0) ? GlobalConfig.electric_field_test_beta : -GlobalConfig.electric_field_test_beta;
+    }
+}
 class RaizerConductivity : ConductivityModel{
 /*
     Test with the formula from: Y. P. Razier, Gas Discharge Physics (Springer-Verlag, 1991)
@@ -362,6 +378,9 @@ ConductivityModel create_conductivity_model(string name, GasModel gm){
         break;
     case "constant":
         conductivity_model = new ConstantConductivity();
+        break;
+    case "constant_tensor":
+        conductivity_model = new ConstantTensorConductivity();
         break;
     case "raizer":
         conductivity_model = new RaizerConductivity();

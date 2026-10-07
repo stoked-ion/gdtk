@@ -29,6 +29,14 @@ import lmr.globalconfig;
 import lmr.fluidfvcell;
 import lmr.fvinterface;
 
+/// The face measure the field solve integrates over: the face length in 2-D (per metre of
+/// depth, as always) and the face area in 3-D. In 2-D this is exactly face.length, so the
+/// established 2-D path is unchanged bit for bit.
+@nogc double face_measure(const FVInterface face)
+{
+    return (GlobalConfig.dimensions == 3) ? face.area[0].re : face.length.re;
+}
+
 interface FieldBC {
     bool isShared() const;
     Vector3 other_pos(const FVInterface face);
@@ -71,16 +79,16 @@ class FixedField : FieldBC {
     final Vector3 other_pos(const FVInterface face) {return face.pos;}
     final int other_id(const FVInterface face) {return -1;}
     final double phif(const FVInterface face) { return value;}
-    final double lhs_direct_component(double fac, const FVInterface face){ return -1.0*face.length.re*fac*face.fs.gas.sigma.re;}
+    final double lhs_direct_component(double fac, const FVInterface face){ return -1.0*face_measure(face)*fac*face.fs.gas.sigma.re;}
     final double lhs_other_component(double fac, const FVInterface face){ return 0.0;}
-    final double rhs_direct_component(double sign, double fac, const FVInterface face){ return face.length.re*fac*face.fs.gas.sigma.re*value;}
+    final double rhs_direct_component(double sign, double fac, const FVInterface face){ return face_measure(face)*fac*face.fs.gas.sigma.re*value;}
     final double rhs_stencil_component(double D, double facx, double facy, double fdx, double fdy, FVInterface jface){
         return (facx*fdx + facy*fdy)/D*value;
     }
     final double lhs_stencil_component(double D, double facx, double facy, double fdx, double fdy, FVInterface jface) { return 0.0; }
 
     final double compute_current(const double sign, const FVInterface face, const FluidFVCell cell){
-        double S = face.length.re;
+        double S = face_measure(face);
         double d = distance_between(face.pos, cell.pos[0]);
         double phigrad = (value - cell.electric_potential)/d; // This implicitly points out of the domain.
         double sigma = face.fs.gas.sigma.re;
@@ -125,7 +133,9 @@ class SheathField : FieldBC {
          double segment_pitch=0.0, double segment_fill=1.0, double segment_x0=0.0,
          double Ex_applied=0.0, double Ex_quad=0.0, double Ex_cube=0.0,
          double Ex_ramp_steps=0.0, double Ex_ramp_start=0.0,
-         double segment_x1=0.0) {
+         double segment_x1=0.0, double segment_z0=0.0, double segment_z1=0.0) {
+        this.segment_z0 = segment_z0;
+        this.segment_z1 = segment_z1;
         this.Velectrode = Velectrode;
         this.model = model;
         this.segment_pitch = segment_pitch;
@@ -202,6 +212,12 @@ class SheathField : FieldBC {
         pre-existing unbounded behaviour exactly.
     */
     @nogc final bool in_segment_window(const FVInterface face) const {
+        // Spanwise extent (3-D): an electrode narrower than the duct depth occupies
+        // [segment_z0, segment_z1]; 0/0 (the default) spans the whole depth.
+        if (segment_z1 > segment_z0) {
+            double zf = face.pos.z.re;
+            if (zf < segment_z0 || zf > segment_z1) return false;
+        }
         if (!(segment_x1 > segment_x0)) return true;
         double xf = face.pos.x.re;
         return (xf >= segment_x0) && (xf <= segment_x1);
@@ -228,7 +244,7 @@ class SheathField : FieldBC {
     final double lhs_stencil_component(double D, double facx, double facy, double fdx, double fdy, FVInterface jface){ return 0.0; }
     final double compute_current(const double sign, const FVInterface face, const FluidFVCell cell){
         if (!is_electrode(face)) return 0.0; // insulator strip between segments
-        double S = face.length.re;
+        double S = face_measure(face);
         double dV = cell.electric_potential.re - Velectrode_at(face);
         return model.current(dV, face.fs.gas, GlobalConfig.gmodel_master)*S; // sheath current out into electrode
     }
@@ -238,7 +254,7 @@ class SheathField : FieldBC {
     //   I_into_cell = -S*J(dV) ~= -S*Jp*phi_cell + S*(Jp*phi_cell - J0)
     // giving A[diag] += a_diag, b[k] += b_rhs with:
     void linearized_robin(const FVInterface face, double phi_cell, GasModel gm, out double a_diag, out double b_rhs){
-        double S = face.length.re;
+        double S = face_measure(face);
         // NaN guard: cell.electric_potential is NaN before the first solve. A nonlinear
         // model linearized about NaN gives a NaN matrix that never recovers (the linear
         // model is immune because phi_cell cancels). Seed the first linearization with
@@ -260,6 +276,7 @@ private:
     double Velectrode;
     SheathModel model;
     double segment_pitch, segment_fill, segment_x0, segment_x1;
+    double segment_z0, segment_z1;
     double Ex_applied, Ex_quad, Ex_cube;
     double Ex_ramp_steps, Ex_ramp_start;
 }
@@ -296,7 +313,9 @@ class CircuitElectrode : FieldBC {
 */
     this(ExternalCircuit circuit, int node_id, SheathModel model,
          double segment_pitch=0.0, double segment_fill=1.0, double segment_x0=0.0,
-         double segment_x1=0.0) {
+         double segment_x1=0.0, double segment_z0=0.0, double segment_z1=0.0) {
+        this.segment_z0 = segment_z0;
+        this.segment_z1 = segment_z1;
         this.circuit = circuit;
         this.node_id = node_id;
         this.model = model;
@@ -326,6 +345,12 @@ class CircuitElectrode : FieldBC {
         pre-existing unbounded behaviour exactly.
     */
     @nogc final bool in_segment_window(const FVInterface face) const {
+        // Spanwise extent (3-D): an electrode narrower than the duct depth occupies
+        // [segment_z0, segment_z1]; 0/0 (the default) spans the whole depth.
+        if (segment_z1 > segment_z0) {
+            double zf = face.pos.z.re;
+            if (zf < segment_z0 || zf > segment_z1) return false;
+        }
         if (!(segment_x1 > segment_x0)) return true;
         double xf = face.pos.x.re;
         return (xf >= segment_x0) && (xf <= segment_x1);
@@ -352,7 +377,7 @@ class CircuitElectrode : FieldBC {
     final double lhs_stencil_component(double D, double facx, double facy, double fdx, double fdy, FVInterface jface){ return 0.0; }
     final double compute_current(const double sign, const FVInterface face, const FluidFVCell cell){
         if (!is_electrode(face)) return 0.0; // insulator strip between segments
-        double S = face.length.re;
+        double S = face_measure(face);
         double dV = cell.electric_potential.re - Velectrode_at(face);
         return model.current(dV, face.fs.gas, GlobalConfig.gmodel_master)*S;
     }
@@ -394,7 +419,7 @@ class CircuitElectrode : FieldBC {
 
     void linearized_robin_circuit(const FVInterface face, double phi_cell, GasModel gm,
                                   out double a_diag, out double u_coeff, out double b_rhs){
-        double S = face.length.re;
+        double S = face_measure(face);
         double q_m = Velectrode_at(face);
         if (phi_cell != phi_cell) phi_cell = q_m; // NaN guard, as in SheathField
         double dV0 = phi_cell - q_m;
@@ -414,6 +439,7 @@ private:
     int node_id;
     SheathModel model;
     double segment_pitch, segment_fill, segment_x0, segment_x1;
+    double segment_z0, segment_z1;
 }
 
 class MixedField : FieldBC {
@@ -509,37 +535,62 @@ private:
 }
 
 class FixedField_Test : FieldBC {
-    this() {}
+/*
+    Dirichlet boundary at an exact solution, for verification. fn selects it:
+      "exp_sin"    (default)  phi = exp(x) sin(y)                 -- the original 2-D test
+      "harmonic3d"            phi = exp(sqrt(2) x) sin(y) cos(z)  -- harmonic in 3-D
+      "linear"                phi = phi0 + gx x + gy y + gz z     -- e.g. the J = 0 field (u x B).r
+      "quadratic"             phi = linear + (1/2) r.Q.r, Q symmetric (qxx qyy qzz qxy qxz qyz):
+                              exact for a uniform tensor when sigma_S : Q = 0
+*/
+    this(string fn="exp_sin", double phi0=0.0, double gx=0.0, double gy=0.0, double gz=0.0,
+         double[6] q=[0.0, 0.0, 0.0, 0.0, 0.0, 0.0]) {
+        this.fn = fn; this.phi0 = phi0; this.gx = gx; this.gy = gy; this.gz = gz; this.q = q;
+        if (fn != "exp_sin" && fn != "harmonic3d" && fn != "linear" && fn != "quadratic")
+            throw new Error("FixedField_Test fn must be exp_sin, harmonic3d, linear or quadratic, got: " ~ fn);
+    }
+    double exact(double x, double y, double z) const {
+        if (fn == "harmonic3d") return exp(SQRT2*x)*sin(y)*cos(z);
+        if (fn == "linear") return phi0 + gx*x + gy*y + gz*z;
+        if (fn == "quadratic")
+            return phi0 + gx*x + gy*y + gz*z
+                + 0.5*(q[0]*x*x + q[1]*y*y + q[2]*z*z) + q[3]*x*y + q[4]*x*z + q[5]*y*z;
+        return exp(x)*sin(y);
+    }
 
     final bool isShared() const { return false; }
     final Vector3 other_pos(const FVInterface face) {return face.pos;}
     final int other_id(const FVInterface face) {return -1;}
-    final double phif(const FVInterface face) { return exp(face.pos.x.re)*sin(face.pos.y.re);}
-    final double lhs_direct_component(double fac, const FVInterface face){ return -1.0*face.length.re*fac*face.fs.gas.sigma.re;}
+    final double phif(const FVInterface face) { return exact(face.pos.x.re, face.pos.y.re, face.pos.z.re);}
+    final double lhs_direct_component(double fac, const FVInterface face){ return -1.0*face_measure(face)*fac*face.fs.gas.sigma.re;}
     final double lhs_other_component(double fac, const FVInterface face){ return 0.0;}
-    final double rhs_direct_component(double sign, double fac, const FVInterface face){ return face.length.re*fac*face.fs.gas.sigma.re*phif(face);}
+    final double rhs_direct_component(double sign, double fac, const FVInterface face){ return face_measure(face)*fac*face.fs.gas.sigma.re*phif(face);}
     final double rhs_stencil_component(double D, double facx, double facy, double fdx, double fdy, FVInterface jface){
         return (facx*fdx + facy*fdy)/D*phif(jface);
     }
     final double lhs_stencil_component(double D, double facx, double facy, double fdx, double fdy, FVInterface jface) { return 0.0; }
 
     final double compute_current(const double sign, const FVInterface face, const FluidFVCell cell){
-        double S = face.length.re;
+        double S = face_measure(face);
         double d = distance_between(face.pos, cell.pos[0]);
-        double phi = test_field(face.pos.x.re, face.pos.y.re);
+        double phi = exact(face.pos.x.re, face.pos.y.re, face.pos.z.re);
         double phigrad = (phi - cell.electric_potential)/d; // This implicitly points out of the domain.
         double sigma = face.fs.gas.sigma.re;
         double I = sigma*phigrad*S;
         return I;
     }
     double test_field(double x, double y){
-        return exp(x)*sin(y);
+        return exact(x, y, 0.0);
     }
     void test_field_gradient(double x, double y, ref double dphidx, ref double dphidy){
         dphidx = exp(x)*sin(y);
         dphidy = exp(x)*cos(y);
         return;
     }
+private:
+    string fn;
+    double phi0, gx, gy, gz;
+    double[6] q;
 }
 
 class FixedGradient_Test : FieldBC {
@@ -553,7 +604,7 @@ class FixedGradient_Test : FieldBC {
     final double lhs_direct_component(double fac, const FVInterface face){ return 0.0;}
     final double lhs_other_component(double fac, const FVInterface face){ return 0.0;}
     final double rhs_direct_component(double sign, double fac, const FVInterface face){
-        double S = face.length.re;
+        double S = face_measure(face);
         double sigma = face.fs.gas.sigma.re;
         Vector3 phigrad = test_field_gradient(face.pos.x.re, face.pos.y.re);
 
@@ -564,7 +615,7 @@ class FixedGradient_Test : FieldBC {
     final double lhs_stencil_component(double D, double facx, double facy, double fdx, double fdy, FVInterface jface) { return 0.0; }
 
     final double compute_current(const double sign, const FVInterface face, const FluidFVCell cell){
-        double S = face.length.re;
+        double S = face_measure(face);
         Vector3 phigrad = test_field_gradient(face.pos.x.re, face.pos.y.re);
         number phigrad_dot_n = sign*phigrad.dot(face.n); // TODO: Should this be negative sign?
         double sigma = face.fs.gas.sigma.re;
@@ -626,8 +677,8 @@ class SharedField : FieldBC {
     final Vector3 other_pos(const FVInterface face) {return (other_cell_lefts[face.i_bndry]) ? face.left_cell.pos[0] : face.right_cell.pos[0];}
     final int other_id(const FVInterface face) {return other_cell_ids[face.i_bndry] + other_block_offset;}
     final double phif(const FVInterface face) { return (other_cell_lefts[face.i_bndry]) ? face.left_cell.electric_potential : face.right_cell.electric_potential;}
-    double lhs_direct_component(double fac, const FVInterface face){ return -1.0*face.length.re*fac*face.fs.gas.sigma.re; }
-    double lhs_other_component(double fac, const FVInterface face){ return 1.0*face.length.re*fac*face.fs.gas.sigma.re; }
+    double lhs_direct_component(double fac, const FVInterface face){ return -1.0*face_measure(face)*fac*face.fs.gas.sigma.re; }
+    double lhs_other_component(double fac, const FVInterface face){ return 1.0*face_measure(face)*fac*face.fs.gas.sigma.re; }
     double rhs_direct_component(double sign, double fac, const FVInterface face){ return 0.0; }
     final double rhs_stencil_component(double D, double facx, double facy, double fdx, double fdy, FVInterface jface){ return 0.0; }
     final double lhs_stencil_component(double D, double facx, double facy, double fdx, double fdy, FVInterface jface){
@@ -701,8 +752,8 @@ class MPISharedField : FieldBC {
     final Vector3 other_pos(const FVInterface face) {return (other_cell_lefts[face.i_bndry]) ? face.left_cell.pos[0] : face.right_cell.pos[0];}
     final int other_id(const FVInterface face) {return external_cell_idxs[face.i_bndry];}
     final double phif(const FVInterface face) { return (other_cell_lefts[face.i_bndry]) ? face.left_cell.electric_potential : face.right_cell.electric_potential;}
-    double lhs_direct_component(double fac, const FVInterface face){ return -1.0*face.length.re*fac*face.fs.gas.sigma.re; }
-    double lhs_other_component(double fac, const FVInterface face){ return 1.0*face.length.re*fac*face.fs.gas.sigma.re; }
+    double lhs_direct_component(double fac, const FVInterface face){ return -1.0*face_measure(face)*fac*face.fs.gas.sigma.re; }
+    double lhs_other_component(double fac, const FVInterface face){ return 1.0*face_measure(face)*fac*face.fs.gas.sigma.re; }
     double rhs_direct_component(double sign, double fac, const FVInterface face){ return 0.0; }
     final double rhs_stencil_component(double D, double facx, double facy, double fdx, double fdy, FVInterface jface){ return 0.0; }
     final double lhs_stencil_component(double D, double facx, double facy, double fdx, double fdy, FVInterface jface){
@@ -748,9 +799,12 @@ FieldBC create_field_bc(JSONValue field_bc_json, const BoundaryCondition bc, con
         double Ex_ramp_steps = getJSONdouble(field_bc_json, "Ex_ramp_steps", 0.0);
         double Ex_ramp_start = getJSONdouble(field_bc_json, "Ex_ramp_start", 0.0);
         double segment_x1 = getJSONdouble(field_bc_json, "segment_x1", 0.0);
+        double segment_z0 = getJSONdouble(field_bc_json, "segment_z0", 0.0);
+        double segment_z1 = getJSONdouble(field_bc_json, "segment_z1", 0.0);
         field_bc = new SheathField(Velectrode, create_sheath_model(sheath_model, field_bc_json),
                                    segment_pitch, segment_fill, segment_x0, Ex_applied, Ex_quad,
-                                   Ex_cube, Ex_ramp_steps, Ex_ramp_start, segment_x1);
+                                   Ex_cube, Ex_ramp_steps, Ex_ramp_start, segment_x1,
+                                   segment_z0, segment_z1);
         break;
     case "CircuitElectrode":
         if (circuit is null)
@@ -762,9 +816,11 @@ FieldBC create_field_bc(JSONValue field_bc_json, const BoundaryCondition bc, con
         double ce_fill = getJSONdouble(field_bc_json, "segment_fill", 1.0);
         double ce_x0 = getJSONdouble(field_bc_json, "segment_x0", 0.0);
         double ce_x1 = getJSONdouble(field_bc_json, "segment_x1", 0.0);
+        double ce_z0 = getJSONdouble(field_bc_json, "segment_z0", 0.0);
+        double ce_z1 = getJSONdouble(field_bc_json, "segment_z1", 0.0);
         field_bc = new CircuitElectrode(circuit, node,
                                         create_sheath_model(ce_sheath_model, field_bc_json),
-                                        ce_pitch, ce_fill, ce_x0, ce_x1);
+                                        ce_pitch, ce_fill, ce_x0, ce_x1, ce_z0, ce_z1);
         break;
     case "MixedField":
         double differential = getJSONdouble(field_bc_json, "differential", 1.0);
@@ -776,7 +832,14 @@ FieldBC create_field_bc(JSONValue field_bc_json, const BoundaryCondition bc, con
         field_bc = new FixedGradient_Test();
         break;
     case "FixedField_Test":
-        field_bc = new FixedField_Test();
+        field_bc = new FixedField_Test(getJSONstring(field_bc_json, "fn", "exp_sin"),
+                                       getJSONdouble(field_bc_json, "phi0", 0.0),
+                                       getJSONdouble(field_bc_json, "gx", 0.0),
+                                       getJSONdouble(field_bc_json, "gy", 0.0),
+                                       getJSONdouble(field_bc_json, "gz", 0.0),
+                                       [getJSONdouble(field_bc_json, "qxx", 0.0), getJSONdouble(field_bc_json, "qyy", 0.0),
+                                        getJSONdouble(field_bc_json, "qzz", 0.0), getJSONdouble(field_bc_json, "qxy", 0.0),
+                                        getJSONdouble(field_bc_json, "qxz", 0.0), getJSONdouble(field_bc_json, "qyz", 0.0)]);
         break;
     case "unspecified":
         version(mpi_parallel){

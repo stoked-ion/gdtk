@@ -188,6 +188,79 @@ Under the split, two boundary treatments that were adequate for the scalar path 
 
 **Status.** With both corrections the scheme is exact to round-off on a `J = 0` exact solution at β = 15, for all four `ZG*` families and both wall orientations. At β≈16 it runs in second order and is converged for engineering purposes: it sits on a ~5e-3 relative residual floor, but that is a Hall-term limit cycle confined to a near-wall band in the current-turning region — the core is converged to 1e-7, no integrated quantity moves by more than 0.13%, and the identical case with `electric_field_hall_effect = false` converges to 7e-11. If it ever needs removing, the target is the near-wall Hall stencil, not the CFL or the field–flow coupling. At β ≈ 1.4 in the solver it agrees with `central` to 0.09% in F_x and total current, and the boundary condition is directly confirmed there: median |J_x| in the end cells falls from 1.50e5 (against a bulk 1.62e5 — i.e. the old condition lets the full Hall current flow straight out of the domain) to 5.98e3, with the bulk unchanged. It still fails at β ≈ 15 on a **cold, σ-collapsing electrode wall**; that residual error is the first-order donor-cell upwinding — Parent's minmod anti-diffusion (his term 4) is not implemented anywhere in the tree, and is the next piece of work. Standalone verification harnesses: `tools/hall-stencil/zngbc.py` (recovers and checks the `ZG*` Maxima conventions, derives the `_Gx/_Gy` coefficients) and `tools/hall-stencil/channel.py` (assembles the whole scheme against an exact solution; this is where to reproduce a suspected boundary defect cheaply, rather than in a 10-minute solver run).
 
+#### The 3-D (dimension-generic) field solve
+
+The 2-D solver is a 5-band, 4-face, closed-form (Maxima) assembly. In 3-D, and in 2-D on
+request (`LMR_EFIELD_GENERIC=1`, for cross-checking), `efield.d` uses `assemble_generic`
+instead. It is the same **central** scheme written once for any face count, plus what a
+field misaligned with the grid needs. The upwind (Path 2) Hall scheme is 2-D only and is
+refused in 3-D.
+
+- **Gradient reconstruction** (`efieldstencil.d`): the closed forms are the solution of a
+  square fit, phi_j - phi_k = g.d_j + sum_a h_a d_ja^2 (the interior `R_*` family). An
+  insulating face replaces its row by a slope row n.g = g_n (the `ZG*` families). Solved
+  numerically per cell: 4x4 in 2-D, 6x6 in 3-D, edge and corner cells included. Checked
+  against every 2-D closed form to 4e-14.
+- **Field and tensor:** `appliedBVecAt(x,y,z)` gives B along `applied_B_direction`
+  (x/y/z in 3-D), or from `config.applied_B_map`. The tensor is
+  `sigma b b + sigma_P (I - b b) + sigma_H [b]x`. The new 3-D physics is conduction along B
+  at the full sigma, about 1+beta^2 (~250 at condition 6) times sigma_P.
+- **Cross-diffusion** (`cross_terms`, 19 bands): automatic with a map, or force it with
+  `config.electric_field_cross_terms`. With b tilted from the grid axes, the symmetric part
+  of the tensor has off-diagonal terms. Applying the hybrid stencil's remainder to the
+  cell's OWN centre gradient (the 2-D scheme) cancels them exactly in the net flux.
+  Measured: a tilted-tensor exact solution did not converge at all (order 0.0). It is
+  therefore applied to a face gradient, half from the neighbour's tangential differences
+  through the 12 edge neighbours; that converges at second order (order 1.83). The Hall
+  (antisymmetric) remainder keeps the cell gradient, as in 2-D.
+- **`config.electric_field_hall_gate`:**
+  - `legacy` (default): the 2-D central gate exactly. Boundary and wall-layer faces get the
+    unmagnetised sigma, insulating walls get dphi/dn = 0, and electrode phantoms are a
+    mirror. A wall normal to B (a 3-D side wall) is not gated.
+  - `rotation`: drops only the Hall rotation there, and makes the insulator condition the
+    tensor J.n = 0, an oblique slope row. **Required with a field map:** `legacy` gates
+    every tilted side-wall cell to an isotropic sigma, a short circuit.
+  - `none`: no gate, for verification.
+- **Electrodes narrower than the depth:** `segment_z0/z1` on SheathField and
+  CircuitElectrode.
+- **The face measure** is `face_measure(face)`: the length in 2-D, the area in 3-D.
+- **The 3-D MHD source must be the D source** (`config.mhd_source`, vector Ohm's law, J x B,
+  |J|^2/sigma). The X2 Lua UDFs form J from E_x, E_y only, and miss the Joule heating of
+  current along B. Zero the UDF's J x B and Joule and keep its radiation. The source box has
+  `mhd_source_zmin/zmax` in 3-D.
+- **Field map:** `config.applied_B_map` is a planar CSV (x, y, Bx, By, a regular grid)
+  extruded along the missing axis.
+  - `applied_B_map_plane = "xz"` means map y = depth = simulation z, the X2 magnet.
+  - Also set `_scale` (1e-3 for mm), `_x_offset`, `_y_offset`, `_field_scale` and
+    `_clip_reversed`.
+  - Verified against an independent bilinear interpolation to 2e-9 T.
+  - Snapshots carry the field the solver used as `Bapp.x/y/z`.
+- **Linear solver:** `config.electric_field_gmres_restart = m` gives a restarted
+  GMRES(m) with a preconditioned-residual criterion `electric_field_gmres_rtol`. 0, the
+  default, keeps the original unrestarted solver. **Small m stalls on this system:**
+  GMRES(40) sat at a relative residual of 2.6e-6 after 12000 iterations where full GMRES
+  needs ~290. Use m at or above the needed iteration count (400). Memory is (m+1) x N per
+  rank, and the solution is formed once per cycle, not every iteration.
+
+Verification (`Argon-ABLE/E3D/`, `E3D/ftest/`):
+- **2-D:** the generic path reproduces the 2-D path through a whole coupled NK run (F_x
+  +73.8064246223 N/m, condition 6, 250 V) to 6e-13, and the shipped 2-D field example to
+  its recorded RMS.
+- **Extrusion:** the 3-D extrusion of that coupled case (8 MPI ranks) gives the same F_x
+  per metre of depth to 2.5e-10.
+- **Rotation:** a 90 deg rotation about x (electrodes on the z-walls, B along -y) gives the
+  same answer to 5e-14.
+- **Field-only:** harmonic 3-D converges at second order; the exact J = 0 field
+  phi = (u x B).r is reproduced to 1e-13 with a tilted tensor, in every gate mode; shared
+  memory and MPI agree to 7e-12 with cross terms on.
+
+**Latent 2-D bug, not fixed:** lmr's face order is west, east, south, north (bottom, top),
+the `Face` enum, so the 2-D phantom-point pairing `(j+2)%4` picks a PERPENDICULAR face.
+The electrode phantom is therefore a mirror, not the linear extrapolation its comments
+describe. The 2-D N/E/S/W names in the derivative families are only labels and are
+harmless. With the correct pairing, condition 6 at 250 V gains 3.6% in F_x. `legacy`
+reproduces the mirror on purpose; `rotation` and `none` use the correct pairing.
+
 ### 3. Built-in single-fluid MHD (`version(MHD)`, default on via `MHD ?= 1`) — present but rough in lmr
 
 The Bond/Wheatley single-fluid model, ported from Eilmer 4 (README: "a work in progress"). It is wired through conserved quantities (adds `xB, yB, zB, psi, divB`, and forces z-momentum on in 2D — `conservedquantities.d:133-184`), config keys (`config.MHD`, `MHD_static_field`, `MHD_resistive`, `divergence_cleaning`, `c_h`, `divB_damping_length` — `lua-modules/globalconfig.lua:30`), HLLE flux + Dedner divergence cleaning (`fluxcalc.d:142`), and explicit-update divergence damping (`simcore_gasdynamic_step.d:1122`). **Caveats:**

@@ -123,7 +123,13 @@ string[] buildFluidVariables()
     if (cfg.solve_electric_field) {
         variables ~= "E.x";
         variables ~= "E.y";
+        if (cfg.dimensions == 3) variables ~= "E.z";
         variables ~= "phi";
+        if (cfg.dimensions == 3) {
+            // The applied field the 3-D solve used at the cell centre (field map or
+            // applied_B_direction), written so post-processing never has to re-derive it.
+            variables ~= "Bapp.x"; variables ~= "Bapp.y"; variables ~= "Bapp.z";
+        }
     }
     //
     return variables;
@@ -261,6 +267,10 @@ public:
         case "sigma": return fcell.fs.gas.sigma.re;
         case "E.x": return fcell.electric_field[0];
         case "E.y": return fcell.electric_field[1];
+        case "E.z": return fcell.electric_field[2];
+        case "Bapp.x": return appliedBVecAt(fcell.pos[0].x.re, fcell.pos[0].y.re, fcell.pos[0].z.re).x.re;
+        case "Bapp.y": return appliedBVecAt(fcell.pos[0].x.re, fcell.pos[0].y.re, fcell.pos[0].z.re).y.re;
+        case "Bapp.z": return appliedBVecAt(fcell.pos[0].x.re, fcell.pos[0].y.re, fcell.pos[0].z.re).z.re;
         case "phi": return fcell.electric_potential;
         default:
             throw new LmrException("Invalid selection for cell variable: " ~ var);
@@ -321,6 +331,9 @@ public:
         case "sigma": fcell.fs.gas.sigma.re = value; return fcell.fs.gas.sigma.re;
         case "E.x": fcell.electric_field[0] = value; return fcell.electric_field[0];
         case "E.y": fcell.electric_field[1] = value; return fcell.electric_field[1];
+        case "E.z": fcell.electric_field[2] = value; return fcell.electric_field[2];
+        case "Bapp.x", "Bapp.y", "Bapp.z":   // output only (derived from the config): discard
+            static double bapp_sink; bapp_sink = value; return bapp_sink;
         case "phi": fcell.electric_potential = value; return fcell.electric_potential;
         default:
             throw new LmrException("Invalid selection for cell variable: " ~ var);

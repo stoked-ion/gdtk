@@ -22,11 +22,13 @@ import nm.number;
 import ntypes.complex;
 
 import lmr.efield.efieldbc;
+import gas : GasModel;
 import lmr.efield.efieldcircuit;
 import lmr.efield.efieldconductivity;
 import lmr.efield.efieldderivatives;
 import lmr.efield.efieldexchange;
 import lmr.efield.efieldgmres;
+import lmr.efield.efieldstencil;
 import lmr.fluidblock;
 import lmr.fluidfvcell;
 import lmr.fvinterface;
@@ -41,6 +43,27 @@ immutable uint[4] ZNG_types = [ZNG_north, ZNG_east, ZNG_south, ZNG_west];
 
 class ElectricField {
     this(const FluidBlock[] localFluidBlocks, const string conductivity_model_name) {
+        nd = GlobalConfig.dimensions;
+        nf = 2*nd;
+        nbands = nf + 1;
+        dband = diagBand(nf);
+        generic = (nd == 3) || (environment.get("LMR_EFIELD_GENERIC", "0") == "1");
+        {
+            string g = GlobalConfig.electric_field_hall_gate;
+            if (g == "legacy") gate_mode = GATE_LEGACY;
+            else if (g == "rotation") gate_mode = GATE_ROTATION;
+            else if (g == "none") gate_mode = GATE_NONE;
+            else throw new Error("config.electric_field_hall_gate must be legacy, rotation or none, got: " ~ g);
+            if (!generic && gate_mode != GATE_LEGACY)
+                throw new Error("config.electric_field_hall_gate other than \"legacy\" needs the generic (3-D) field solve.");
+        }
+        if (generic && nd == 3)
+            cross_terms = (GlobalConfig.applied_B_map_nx > 0) || GlobalConfig.electric_field_cross_terms;
+        // Verification only: LMR_EFIELD_NOCROSS=1 removes the cross-diffusion columns, to
+        // measure what they do.
+        if (environment.get("LMR_EFIELD_NOCROSS", "0") == "1") cross_terms = false;
+        buildEdgeTable();
+        if (cross_terms) nbands = nf + 1 + nedge;
         N = 0;
         foreach(block; localFluidBlocks){
             block_offsets ~= N;
@@ -89,6 +112,15 @@ class ElectricField {
                 throw new Error("LMR_INSULATOR_BC must be tensor, emf or legacy; got '"~m~"'");
             }
         }
+        if (generic && !hall_scheme_central)
+            throw new Error("The Path 2 upwind Hall scheme (LMR_HALL_SCHEME=upwind) is 2-D only; "
+                            ~ "the dimension-generic (3-D) field solve uses the central scheme.");
+        if (generic && nd == 2 && GlobalConfig.applied_B_direction == "y")
+            throw new Error("LMR_EFIELD_GENERIC=1 does not reproduce the 2-D in-plane (\"y\") closed-drift "
+                            ~ "model; run that case on the established 2-D path.");
+        if (GlobalConfig.is_master_task && generic)
+            writefln("  [efield] dimension-generic assembly, %d-D, %d bands, Hall gate %s, cross-diffusion %s",
+                     nd, nbands, GlobalConfig.electric_field_hall_gate, cross_terms ? "on" : "off");
         if (GlobalConfig.is_master_task)
             writefln("  [efield/hall] scheme = %s", hall_scheme_central ? "central (original)" : "upwind (Path 2)");
             if (!hall_scheme_central) {
@@ -159,6 +191,24 @@ class ElectricField {
                 foreach(face; cell.iface){
                     if (face.is_on_boundary &&
                         ((cast(ZeroNormalGradient) field_bcs[i][face.bc_id]) !is null)) {
+                        // The gate exists because a one-sided wall family changes the
+                        // reconstruction of the gradient TANGENTIAL to the wall, which the
+                        // Hall rotation reads. At a wall NORMAL to B (a 3-D side wall) the
+                        // Hall rotation acts only in the plane of that wall's in-plane
+                        // gradient, which the one-sided row in the normal direction does not
+                        // touch, and J.n = sigma (E'.n) needs no gate. So in the generic path
+                        // gate only walls with a component of n across B. In 2-D every wall
+                        // is across B_z, which is exactly the established rule.
+                        if (generic) {
+                            Vector3 Bf = appliedBVecAt(face.pos.x.re, face.pos.y.re, face.pos.z.re);
+                            double bm = sqrt(Bf.x.re^^2 + Bf.y.re^^2 + Bf.z.re^^2);
+                            if (bm > 0.0) {
+                                double cx = face.n.y.re*Bf.z.re - face.n.z.re*Bf.y.re;
+                                double cy = face.n.z.re*Bf.x.re - face.n.x.re*Bf.z.re;
+                                double cz = face.n.x.re*Bf.y.re - face.n.y.re*Bf.x.re;
+                                if (sqrt(cx*cx + cy*cy + cz*cz)/bm < 1.0e-6) continue;   // n parallel to B
+                            }
+                        }
                         zng_layer[cell.id + block_offsets[i]] = true;
                     }
                 }
@@ -379,7 +429,7 @@ class ElectricField {
 
         // Hall convection field (Path 2). Must run before the assembly, and before the
         // linear solve, which reuses the exchanger's buffer for phi.
-        computeHallVertexField(localFluidBlocks);
+        if (!generic) computeHallVertexField(localFluidBlocks);
 
         // Border blocks of the augmented system (Path 1). Only touched when a
         // circuit is present; otherwise everything below is exactly as before.
@@ -395,6 +445,28 @@ class ElectricField {
             circuit.assemble_L_and_c(Lmat, cvec);
         }
 
+        if (generic) {
+            assemble_generic(localFluidBlocks, K);
+            // LMR_EFIELD_DEBUG=1: report rows with a zero/NaN diagonal or a repeated column
+            // (a repeated column breaks the ILU(0) structure).
+            if (environment.get("LMR_EFIELD_DEBUG", "0") == "1") {
+                int bad = 0;
+                foreach (kk; 0 .. N) {
+                    double dg = A[kk*nbands + dband];
+                    bool nanrow = false;
+                    foreach (bb; 0 .. nbands) if (A[kk*nbands + bb] != A[kk*nbands + bb]) nanrow = true;
+                    bool dup = false;
+                    foreach (b1; 0 .. nbands) foreach (b2; b1+1 .. nbands)
+                        if (Ai[kk*nbands + b1] >= 0 && Ai[kk*nbands + b1] == Ai[kk*nbands + b2]) dup = true;
+                    if ((dg == 0.0 || nanrow || dup) && bad < 10) {
+                        writefln("  [efield/debug] row %d: diag %g nan %s dup %s  Ai %s  A %s", kk, dg, nanrow, dup,
+                                 Ai[kk*nbands .. (kk+1)*nbands], A[kk*nbands .. (kk+1)*nbands]);
+                        bad++;
+                    }
+                }
+                writefln("  [efield/debug] checked %d rows", N);
+            }
+        } else {
         FluidFVCell other;
         foreach(blkid, block; localFluidBlocks){
             auto gmodel = block.myConfig.gmodel;
@@ -1123,6 +1195,8 @@ class ElectricField {
             }
         }
 
+        } // end legacy 2-D assembly
+
         // CONSERVATION CHECK (Path 2). For any cell all of whose faces are interior or
         // block-shared, the assembled row must annihilate a uniform phi: the diffusive
         // terms are differences, the FD-stencil gradient is exact on constants, and the
@@ -1178,7 +1252,7 @@ class ElectricField {
                 foreach(cell; block.cells){
                     int k = cell.id + block_offsets[blkid];
                     //writefln(" A[i,:]=[%e,%e,%e,%e,%e] b=[%e]", A[k*nbands+0], A[k*nbands+1], A[k*nbands+2], A[k*nbands+3], A[k*nbands+4], b[k]);
-                    double Akk = A[k*nbands + 2];
+                    double Akk = A[k*nbands + dband];
                     b[k] /= Akk;
                     foreach(iio; 0 .. nbands) A[k*nbands + iio] /= Akk;
                     // Uc is part of THIS SAME ROW of the augmented system, so it must
@@ -1361,6 +1435,9 @@ class ElectricField {
         @author: Nick Gibbons
     */
 
+        if (generic) {
+            compute_electric_field_vector_generic(localFluidBlocks);
+        } else {
         FluidFVCell other;
         foreach(blkid, block; localFluidBlocks){
             foreach(cell; block.cells){
@@ -1576,8 +1653,10 @@ class ElectricField {
 
                 cell.electric_field[0] = Ex;
                 cell.electric_field[1] = Ey;
+                cell.electric_field[2] = 0.0;
             }
         }
+        } // end legacy 2-D reconstruction
 
         // Diagnostic: the largest reconstructed |grad phi| and where it is. A field with
         // an unresolved boundary layer -- the classic magnetised-end-region layer of a
@@ -1588,7 +1667,8 @@ class ElectricField {
             double emax = 0.0, ex_at = 0.0, ey_at = 0.0, exv = 0.0, eyv = 0.0;
             foreach(blkid, block; localFluidBlocks){
                 foreach(cell; block.cells){
-                    double e = sqrt(cell.electric_field[0]^^2 + cell.electric_field[1]^^2);
+                    double e = sqrt(cell.electric_field[0]^^2 + cell.electric_field[1]^^2
+                                    + ((nd == 3) ? cell.electric_field[2]^^2 : 0.0));
                     if (e > emax) {
                         emax = e;
                         ex_at = cell.pos[0].x.re; ey_at = cell.pos[0].y.re;
@@ -1614,6 +1694,450 @@ class ElectricField {
                 writefln("  [efield/hall] max |grad phi| = %.4g V/m (%.4g, %.4g) at x=%.5g y=%.5g",
                          emax, exv, eyv, ex_at, ey_at);
                 stdout.flush();
+            }
+        }
+    }
+
+    /*
+        DIMENSION-GENERIC ASSEMBLY (efieldstencil.d), used in 3-D and, on request, in 2-D.
+
+        It is the established CENTRAL scheme, written once for any number of faces, plus
+        what a field that is NOT aligned with the grid needs:
+
+          * per cell, the potential gradient is reconstructed from the face data points by
+            the square fit of efieldstencil.d (the 2-D R_* and ZG* families are its 4 x 4
+            case); an insulating (ZeroNormalGradient) face contributes a slope row;
+          * a face current J.n = m.(-grad phi + u x B), m = sigma_t^T n, assembled with the
+            hybrid stencil: a two-point difference along the cell-to-neighbour line plus the
+            remainder sv of m applied to a gradient;
+          * the conductivity tensor for a field along b-hat (|B| from appliedBVecAt),
+                sigma_t = sigma b b + sigma_P (I - b b) + sigma_H [b]x,
+            so m = sigma (b.n) b + sigma_P (n - (b.n) b) + sigma_H (n x b). For b = z this is
+            the 2-D tensor sigma/(1+beta^2)[[1,-beta],[beta,1]] exactly. The new physics in
+            3-D is conduction ALONG B, sigma rather than sigma_P, ~1+beta^2 ~ 250 x larger;
+          * CROSS-DIFFUSION. With b tilted from the grid axes the SYMMETRIC part of the
+            tensor has off-diagonal terms (sigma - sigma_P) b_i b_j. Applying sv to the cell's
+            OWN centre gradient -- what the 2-D scheme does, where those terms never exist --
+            cancels them exactly in the cell's net flux (both faces of a pair see the same
+            gradient), dropping d2phi/dx_i dx_j entirely. The symmetric remainder sv_sym is
+            therefore applied to the FACE gradient, half from this cell's reconstruction and
+            half from the neighbour's tangential differences through the edge neighbours
+            (12 extra matrix columns in 3-D, enabled by cross_terms). The Hall (antisymmetric)
+            remainder keeps the cell gradient: its cross derivatives cancel analytically, so
+            the 2-D treatment is consistent for it;
+          * the Hall gate (gate_mode, config.electric_field_hall_gate):
+              legacy   -- the 2-D central scheme exactly: boundary faces and faces of
+                          wall-layer cells use the unmagnetised sigma (beta = 0) and an
+                          insulating wall imposes dphi/dn = 0;
+              rotation -- only the Hall ROTATION is dropped there; sigma_P and the parallel
+                          sigma stay physical, and an insulating wall imposes J.n = 0 for the
+                          symmetric tensor (an oblique slope row, m.grad phi = m.(u x B)). Use
+                          with a tilted field, where 'legacy' would make every side-wall cell
+                          an isotropic sigma short circuit;
+              none     -- no gate: full tensor on every face, Dirichlet faces included
+                          (verification);
+          * sheath and circuit-electrode faces: no gas conduction, the linearised sheath
+            Robin term, and a phantom data point extrapolated through the cell to the
+            opposite neighbour, as in 2-D;
+          * the motional EMF m.(u x B) on every face that is not an insulator or electrode.
+
+        With nd = 2 and the legacy gate it reproduces the 2-D path to round-off (verified,
+        LMR_EFIELD_GENERIC=1), and a z-uniform 3-D case reproduces the 2-D answer per metre.
+    */
+    enum int GATE_LEGACY = 0, GATE_ROTATION = 1, GATE_NONE = 2;
+    enum int FK_INTERIOR = 0, FK_SHARED = 1, FK_ZNG = 2, FK_SHEATH = 3, FK_CIRCUIT = 4, FK_OTHER = 5;
+    enum int MAXE = 12;   // edge neighbours of a hexahedral cell
+
+    /// Face axis in lmr's structured face order (west, east, south, north, bottom, top).
+    @nogc static int faceAxis(int j) { return faceAxisOf(j); }
+
+    /// The edge slots of a cell: unordered pairs of faces on different axes.
+    void buildEdgeTable() {
+        nedge = 0;
+        foreach (a; 0 .. nf) foreach (bb; a+1 .. nf) {
+            if (faceAxis(a) == faceAxis(bb)) continue;
+            edgeA[nedge] = a; edgeB[nedge] = bb; nedge++;
+        }
+    }
+    int edgeSlot(int a, int bb) const {
+        foreach (e; 0 .. nedge)
+            if ((edgeA[e] == a && edgeB[e] == bb) || (edgeA[e] == bb && edgeB[e] == a)) return e;
+        return -1;
+    }
+
+    /// m = sigma_t^T n for the field direction bh (unit), Hall parameter beta >= 0.
+    /// withHall = false drops the antisymmetric (rotation) part only.
+    @nogc static double[3] tensorTransposeDotN(double sigma, double beta, const double[3] bh, const double[3] n,
+                                               bool withHall=true)
+    {
+        double obb = 1.0/(1.0 + beta*beta);
+        double sP = sigma*obb, sH = withHall ? sigma*beta*obb : 0.0;
+        double bn = bh[0]*n[0] + bh[1]*n[1] + bh[2]*n[2];
+        double[3] nxb = [n[1]*bh[2] - n[2]*bh[1], n[2]*bh[0] - n[0]*bh[2], n[0]*bh[1] - n[1]*bh[0]];
+        double[3] m;
+        foreach (a; 0 .. 3) m[a] = sigma*bn*bh[a] + sP*(n[a] - bn*bh[a]) + sH*nxb[a];
+        return m;
+    }
+
+    /// Applied field at a face: vector, magnitude and unit direction.
+    @nogc static void faceField(const FVInterface face, ref double[3] Bf, ref double Bmag, ref double[3] bh)
+    {
+        Vector3 Bv = appliedBVecAt(face.pos.x.re, face.pos.y.re, face.pos.z.re);
+        Bf[0] = Bv.x.re; Bf[1] = Bv.y.re; Bf[2] = Bv.z.re;
+        Bmag = sqrt(Bf[0]^^2 + Bf[1]^^2 + Bf[2]^^2);
+        bh[0] = 0.0; bh[1] = 0.0; bh[2] = 1.0;
+        if (Bmag > 0.0) { bh[0] = Bf[0]/Bmag; bh[1] = Bf[1]/Bmag; bh[2] = Bf[2]/Bmag; }
+    }
+
+    /// Face data points, outward normals, kinds, and (for insulating faces) the slope row's
+    /// direction and right-hand side. setAi also fills the face-neighbour matrix columns.
+    void stencilGeometry(size_t blkid, FluidFVCell cell, GasModel gmodel, ref double[3][MAXF] d,
+                         ref double[3][MAXF] nrm, ref double[3][MAXF] sdir, ref double[MAXF] sg,
+                         ref bool[MAXF] slope, ref int[MAXF] kind, bool setAi)
+    {
+        int k = cell.id + block_offsets[blkid];
+        immutable bool hall_on = GlobalConfig.electric_field_hall_effect && (appliedBzNominal() != 0.0);
+        foreach(io, face; cell.iface){
+            double sign = cell.outsign[io];
+            Vector3 pos;
+            int band = faceBand(to!int(io), nf);
+            if (face.is_on_boundary) {
+                auto fbc = field_bcs[blkid][face.bc_id];
+                pos = fbc.other_pos(face);
+                if (setAi) Ai[k*nbands + band] = fbc.other_id(face);
+                if (fbc.isShared)                                kind[io] = FK_SHARED;
+                else if ((cast(ZeroNormalGradient) fbc) !is null) kind[io] = FK_ZNG;
+                else if ((cast(CircuitElectrode) fbc) !is null)   kind[io] = FK_CIRCUIT;
+                else if ((cast(SheathField) fbc) !is null)        kind[io] = FK_SHEATH;
+                else                                              kind[io] = FK_OTHER;
+            } else {
+                auto other = (face.left_cell is cell) ? face.right_cell : face.left_cell;
+                pos = other.pos[0];
+                if (setAi) Ai[k*nbands + band] = other.id + block_offsets[blkid];
+                kind[io] = FK_INTERIOR;
+            }
+            nrm[io] = [sign*face.n.x.re, sign*face.n.y.re, sign*face.n.z.re];
+            d[io] = [pos.x.re - cell.pos[0].x.re, pos.y.re - cell.pos[0].y.re, pos.z.re - cell.pos[0].z.re];
+            slope[io] = (kind[io] == FK_ZNG);
+            sdir[io] = nrm[io]; sg[io] = 0.0;
+            if (slope[io] && gate_mode != GATE_LEGACY) {
+                // J.n = 0 for the tensor: m.grad phi = m.(u x B) at the wall, as a slope row
+                // along m. 'rotation' drops the Hall part here (the wall face is gated).
+                double[3] Bf, bh; double Bmag;
+                faceField(face, Bf, Bmag, bh);
+                double beta = (hall_on && Bmag > 0.0) ? conductivity.hall_beta(face.fs.gas, gmodel, Bmag) : 0.0;
+                double[3] m = tensorTransposeDotN(1.0, beta, bh, nrm[io], gate_mode == GATE_NONE);
+                double mm = sqrt(m[0]^^2 + m[1]^^2 + m[2]^^2);
+                foreach (a; 0 .. 3) sdir[io][a] = m[a]/mm;
+                double ux = face.fs.vel.x.re, uy = face.fs.vel.y.re, uz = face.fs.vel.z.re;
+                double[3] e = [uy*Bf[2] - uz*Bf[1], uz*Bf[0] - ux*Bf[2], ux*Bf[1] - uy*Bf[0]];
+                sg[io] = sdir[io][0]*e[0] + sdir[io][1]*e[1] + sdir[io][2]*e[2];
+            }
+        }
+    }
+
+    /// Phantom-point factors for electrode faces: phi_j ~= (1 - t) phi_k + t phi_opp along the
+    /// line to the opposite neighbour, t = (d_j . d_opp)/|d_opp|^2 (t = 0, a mirror, when the
+    /// opposite face is itself a boundary). Exact on constant and linear fields.
+    void phantomFactors(const ref double[3][MAXF] d, const ref int[MAXF] kind,
+                        ref double[MAXF] tex, ref int[MAXF] jop)
+    {
+        foreach (j; 0 .. nf) {
+            tex[j] = 0.0; jop[j] = oppositeFace(j);
+            if (kind[j] != FK_SHEATH && kind[j] != FK_CIRCUIT) continue;
+            // 'legacy': the MIRROR (t = 0). The 2-D code pairs face j with (j+2)%4, which in
+            // lmr's face order is a perpendicular face, so on an orthogonal grid its t is
+            // exactly 0 -- a mirror, not the linear extrapolation its comments describe.
+            // Using t = 0 here reproduces it on rectangular grids in ANY orientation (the
+            // pairing itself is not rotation-invariant: measured, it changes F_x by 3.6% at
+            // condition 6, 250 V, between a duct and the same duct rotated about x).
+            if (gate_mode == GATE_LEGACY) continue;
+            int o = jop[j];
+            if (kind[o] != FK_INTERIOR && kind[o] != FK_SHARED) continue;
+            double dd = d[o][0]^^2 + d[o][1]^^2 + d[o][2]^^2;
+            tex[j] = (d[j][0]*d[o][0] + d[j][1]*d[o][1] + d[j][2]*d[o][2])/dd;
+        }
+    }
+
+    /// The cell reached from `cell` through face ja and then face jb (an edge neighbour),
+    /// as a matrix column and a position. Tries ja-then-jb, then jb-then-ja; the first step
+    /// must stay inside the block, the second may cross a block boundary (the remote cell
+    /// is then a first-layer halo cell of that face). Returns false where neither path
+    /// exists (a block edge, or a domain boundary).
+    bool edgeNeighbour(size_t blkid, FluidFVCell cell, int ja, int jb, ref int col, ref Vector3 pos)
+    {
+        foreach (pass; 0 .. 2) {
+            int f1 = (pass == 0) ? ja : jb, f2 = (pass == 0) ? jb : ja;
+            auto face1 = cell.iface[f1];
+            if (face1.is_on_boundary) continue;
+            auto c1 = (face1.left_cell is cell) ? face1.right_cell : face1.left_cell;
+            if (c1.iface.length != nf) continue;
+            auto face2 = c1.iface[f2];
+            if (face2.is_on_boundary) {
+                auto fbc = field_bcs[blkid][face2.bc_id];
+                if (!fbc.isShared) continue;
+                col = fbc.other_id(face2); pos = fbc.other_pos(face2);
+                return true;
+            }
+            auto c2 = (face2.left_cell is c1) ? face2.right_cell : face2.left_cell;
+            col = c2.id + block_offsets[blkid]; pos = c2.pos[0];
+            return true;
+        }
+        return false;
+    }
+
+    void assemble_generic(FluidBlock[] localFluidBlocks, size_t K) {
+        immutable bool hall_on = GlobalConfig.electric_field_hall_effect && (appliedBzNominal() != 0.0);
+        foreach(blkid, block; localFluidBlocks){
+            auto gmodel = block.myConfig.gmodel;
+            foreach(cell; block.cells){
+                int k = cell.id + block_offsets[blkid];
+                if (cell.iface.length != nf)
+                    throw new Error(format("efield: cell with %d faces in a %d-D field solve (structured grids only)",
+                                           cell.iface.length, nd));
+                Ai[nbands*k + dband] = k;
+
+                double[3][MAXF] d, nrm, sdir;
+                double[MAXF] sg;
+                bool[MAXF] slope;
+                int[MAXF] kind;
+                stencilGeometry(blkid, cell, gmodel, d, nrm, sdir, sg, slope, kind, true);
+                double[MAXF][3] W;
+                if (!reconstructionWeights(nd, d, sdir, slope, W))
+                    throw new Error(format("efield: singular gradient stencil at cell %d of block %d (x=%g y=%g z=%g)",
+                                           cell.id, blkid, cell.pos[0].x.re, cell.pos[0].y.re, cell.pos[0].z.re));
+                double[3] Ic = [0.0, 0.0, 0.0];   // centre weight: minus the sum of the data weights
+                foreach (j; 0 .. nf) if (!slope[j]) foreach (a; 0 .. nd) Ic[a] -= W[a][j];
+                double[MAXF] tex;                 // phantom-point extrapolation factor per face
+                int[MAXF] jop;
+                phantomFactors(d, kind, tex, jop);
+
+                // Edge neighbours (cross-diffusion columns).
+                bool[MAXE] ehave; int[MAXE] ecol; Vector3[MAXE] epos;
+                if (cross_terms) {
+                    foreach (e; 0 .. nedge) {
+                        ehave[e] = edgeNeighbour(blkid, cell, edgeA[e], edgeB[e], ecol[e], epos[e]);
+                        Ai[k*nbands + nf + 1 + e] = ehave[e] ? ecol[e] : -1;
+                    }
+                }
+
+                foreach(io, face; cell.iface){
+                    int band = faceBand(to!int(io), nf);
+                    face.fs.gas.sigma = conductivity(face.fs.gas, face.pos, gmodel);
+                    double sign = cell.outsign[io];
+                    double S = face_measure(face);
+                    double sigmaF = face.fs.gas.sigma.re;
+                    double[3] nF = nrm[io];
+                    double emag = sqrt(d[io][0]^^2 + d[io][1]^^2 + d[io][2]^^2);
+                    double[3] eh = [d[io][0]/emag, d[io][1]/emag, d[io][2]/emag];
+                    double[3] Bf, bh; double Bmag;
+                    faceField(face, Bf, Bmag, bh);
+
+                    // The Hall gate (see the header).
+                    bool gated = false;
+                    if (gate_mode != GATE_NONE) {
+                        if (face.is_on_boundary && !(field_bcs[blkid][face.bc_id].isShared)) gated = true;
+                        if (zng_layer[k]) gated = true;
+                        if (!face.is_on_boundary) {
+                            auto pcell = (face.left_cell is cell) ? face.right_cell : face.left_cell;
+                            if (zng_layer[pcell.id + block_offsets[blkid]]) gated = true;
+                        }
+                    }
+                    double beta = (hall_on && Bmag > 0.0) ? conductivity.hall_beta(face.fs.gas, gmodel, Bmag) : 0.0;
+                    bool withHall = true;
+                    if (gated) {
+                        if (gate_mode == GATE_LEGACY) beta = 0.0;   // unmagnetised sigma
+                        else withHall = false;                      // rotation only
+                    }
+                    double[3] m = tensorTransposeDotN(sigmaF, beta, bh, nF, withHall);
+                    double[3] msym = tensorTransposeDotN(sigmaF, beta, bh, nF, false);
+
+                    double fac = (eh[0]*nF[0] + eh[1]*nF[1] + eh[2]*nF[2])/emag;   // unfolded, for BC direct terms
+                    double mdote = eh[0]*m[0] + eh[1]*m[1] + eh[2]*m[2];
+                    double[3] sv = [m[0] - eh[0]*mdote, m[1] - eh[1]*mdote, m[2] - eh[2]*mdote];
+                    double sfac = mdote/emag;
+                    // the symmetric remainder, for the cross-diffusion treatment below
+                    double msde = eh[0]*msym[0] + eh[1]*msym[1] + eh[2]*msym[2];
+                    double[3] svs = [msym[0] - eh[0]*msde, msym[1] - eh[1]*msde, msym[2] - eh[2]*msde];
+
+                    // PART ONE: the direct (two-point) contribution, and the boundary terms.
+                    bool crossFace = false;
+                    if (face.is_on_boundary) {
+                        auto field_bc = field_bcs[blkid][face.bc_id];
+                        if (kind[io] == FK_ZNG) {
+                            // Zero flux by construction: the slope row makes the
+                            // reconstructed gradient satisfy this face's J.n = 0 exactly.
+                            if (gate_mode == GATE_LEGACY) sv = [sigmaF*nF[0], sigmaF*nF[1], sigmaF*nF[2]];
+                            else sv = [0.0, 0.0, 0.0];
+                            sfac = 0.0;
+                        } else if (kind[io] == FK_CIRCUIT) {
+                            auto celec = cast(CircuitElectrode) field_bc;
+                            sv = [0.0, 0.0, 0.0]; sfac = 0.0;
+                            if (celec.is_electrode(face)) {
+                                double q_star = celec.Velectrode_at(face);
+                                double phi_star = cell.electric_potential.re;
+                                if (phi_star != phi_star) phi_star = q_star; // NaN guard
+                                double J0, Jp;
+                                celec.sheathCurrentAndConductance(face, phi_star, gmodel, J0, Jp);
+                                double ad, uc, bc_, wt, ld, cn;
+                                sheathFaceStamp(S, J0, Jp, phi_star, q_star, ad, uc, bc_, wt, ld, cn);
+                                int mm = celec.nodeId();
+                                A[k*nbands + dband] += ad;
+                                b[k]                += bc_;
+                                Uc[mm][k]           += uc;
+                                Wt[mm][k]           += wt;
+                                Lmat[mm*K + mm]     += ld;
+                                cvec[mm]            += cn;
+                            }
+                        } else if (kind[io] == FK_SHEATH) {
+                            auto sheath = cast(SheathField) field_bc;
+                            sv = [0.0, 0.0, 0.0]; sfac = 0.0;
+                            if (sheath.is_electrode(face)) {
+                                double a_diag, b_rhs;
+                                sheath.linearized_robin(face, cell.electric_potential.re, gmodel, a_diag, b_rhs);
+                                A[k*nbands + dband] += a_diag;
+                                b[k]                += b_rhs;
+                            }
+                        } else if (kind[io] == FK_SHARED) {
+                            A[k*nbands + dband] += -1.0*S*sfac;
+                            A[k*nbands + band]  +=  1.0*S*sfac;
+                            crossFace = true;
+                        } else if (gate_mode != GATE_LEGACY && ((cast(FixedField) field_bc) !is null
+                                                                || (cast(FixedField_Test) field_bc) !is null)) {
+                            // Dirichlet face with the tensor: the two-point term against the
+                            // known boundary value.
+                            A[k*nbands + dband] += -1.0*S*sfac;
+                            b[k]                -=  S*sfac*field_bc.phif(face);
+                        } else {
+                            A[k*nbands + dband] += field_bc.lhs_direct_component(fac, face);
+                            A[k*nbands + band]  += field_bc.lhs_other_component(fac, face);
+                            b[k]                -= field_bc.rhs_direct_component(sign, fac, face);
+                        }
+                    } else {
+                        A[k*nbands + dband] += -1.0*S*sfac;
+                        A[k*nbands + band]  +=  1.0*S*sfac;
+                        crossFace = true;
+                    }
+
+                    // Cross-diffusion: half of the symmetric remainder goes to the neighbour's
+                    // tangential derivatives (through the edge neighbours), half stays on this
+                    // cell's reconstruction, per tangential axis. Where a needed edge neighbour
+                    // does not exist the whole of that component stays on this cell.
+                    double[3] svk = sv;   // what is applied to this cell's own gradient
+                    if (cross_terms && crossFace) {
+                        immutable int ax = faceAxis(to!int(io));
+                        foreach (jt; 0 .. nf) {
+                            if (faceAxis(jt) == ax) continue;
+                            if ((jt & 1) == 0) continue;   // one '+' face (east, north, top) per tangential axis
+                            int jm = oppositeFace(jt);
+                            int ep = edgeSlot(to!int(io), jt), em = edgeSlot(to!int(io), jm);
+                            if (ep < 0 || em < 0 || !ehave[ep] || !ehave[em]) continue;
+                            // the neighbour's position: k's face neighbour across io
+                            double[3] pn = [cell.pos[0].x.re + d[io][0], cell.pos[0].y.re + d[io][1], cell.pos[0].z.re + d[io][2]];
+                            double[3] dp = [epos[ep].x.re - pn[0], epos[ep].y.re - pn[1], epos[ep].z.re - pn[2]];
+                            double[3] dm = [pn[0] - epos[em].x.re, pn[1] - epos[em].y.re, pn[2] - epos[em].z.re];
+                            double hp = sqrt(dp[0]^^2 + dp[1]^^2 + dp[2]^^2), hm = sqrt(dm[0]^^2 + dm[1]^^2 + dm[2]^^2);
+                            if (!(hp > 0.0 && hm > 0.0)) continue;
+                            double[3] t = [(dp[0] + dm[0])/(hp + hm), (dp[1] + dm[1])/(hp + hm), (dp[2] + dm[2])/(hp + hm)];
+                            double tn = sqrt(t[0]^^2 + t[1]^^2 + t[2]^^2);
+                            foreach (a; 0 .. 3) t[a] /= tn;
+                            double c = svs[0]*t[0] + svs[1]*t[1] + svs[2]*t[2];   // the symmetric component along t
+                            if (c == 0.0) continue;
+                            // move half of it off this cell's gradient ...
+                            foreach (a; 0 .. 3) svk[a] -= 0.5*c*t[a];
+                            // ... onto the neighbour's 3-point derivative along t
+                            double den = hp*hm*(hp + hm);
+                            double wp = hm*hm/den, wm = -hp*hp/den;
+                            double q = 0.5*S*c;
+                            A[k*nbands + nf + 1 + ep] += q*wp;
+                            A[k*nbands + nf + 1 + em] += q*wm;
+                            A[k*nbands + band]        += -q*(wp + wm);
+                        }
+                    }
+
+                    // PART TWO: the reconstructed-gradient remainder, svk . grad phi_k.
+                    A[k*nbands + dband] += S*(svk[0]*Ic[0] + svk[1]*Ic[1] + svk[2]*Ic[2]);
+                    foreach(jo, jface; cell.iface){
+                        int jband = faceBand(to!int(jo), nf);
+                        double dw = svk[0]*W[0][jo] + svk[1]*W[1][jo] + ((nd == 3) ? svk[2]*W[2][jo] : 0.0);
+                        if (slope[jo]) {
+                            // a slope row's datum is the known wall slope sg
+                            if (sg[jo] != 0.0) b[k] -= S*dw*sg[jo];
+                            continue;
+                        }
+                        if (jface.is_on_boundary) {
+                            auto field_bc = field_bcs[blkid][jface.bc_id];
+                            if (kind[jo] == FK_SHEATH || kind[jo] == FK_CIRCUIT) {
+                                // phantom point phi_j ~= phi_k + t (phi_opp - phi_k)
+                                double w = S*dw;
+                                if (w != 0.0) {
+                                    double t = tex[jo];
+                                    A[k*nbands + dband] += (1.0 - t)*w;
+                                    if (t != 0.0) A[k*nbands + faceBand(jop[jo], nf)] += t*w;
+                                }
+                            } else {
+                                // The *_stencil_component interface is the 2-D dot product
+                                // (facx*fdx + facy*fdy)/D; pass the full 3-D dot product as
+                                // facx with fdx = 1 and D = 1.
+                                A[k*nbands + jband] += S*field_bc.lhs_stencil_component(1.0, dw, 0.0, 1.0, 0.0, jface);
+                                b[k]                -= S*field_bc.rhs_stencil_component(1.0, dw, 0.0, 1.0, 0.0, jface);
+                            }
+                        } else {
+                            A[k*nbands + jband] += S*dw;
+                        }
+                    }
+
+                    // Motional EMF m.(u x B), not on insulators or electrodes.
+                    if (Bmag != 0.0) {
+                        bool insulator = (kind[io] == FK_ZNG) || (kind[io] == FK_SHEATH) || (kind[io] == FK_CIRCUIT);
+                        if (!insulator) {
+                            double ux = face.fs.vel.x.re, uy = face.fs.vel.y.re, uz = face.fs.vel.z.re;
+                            double[3] e = [uy*Bf[2] - uz*Bf[1], uz*Bf[0] - ux*Bf[2], ux*Bf[1] - uy*Bf[0]];
+                            b[k] += S*(m[0]*e[0] + m[1]*e[1] + m[2]*e[2]);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Cell-centre gradient from the solved potential, generic path. Stores +grad(phi) in
+    /// cell.electric_field[0..2] (the solver's convention: physical E = -grad phi).
+    void compute_electric_field_vector_generic(FluidBlock[] localFluidBlocks)
+    {
+        foreach(blkid, block; localFluidBlocks){
+            auto gmodel = block.myConfig.gmodel;
+            foreach(cell; block.cells){
+                double[3][MAXF] d, nrm, sdir;
+                double[MAXF] sg;
+                bool[MAXF] slope;
+                int[MAXF] kind;
+                stencilGeometry(blkid, cell, gmodel, d, nrm, sdir, sg, slope, kind, false);
+                double[MAXF][3] W;
+                if (!reconstructionWeights(nd, d, sdir, slope, W))
+                    throw new Error(format("efield: singular gradient stencil at cell %d of block %d", cell.id, blkid));
+                double[MAXF] tex; int[MAXF] jop;
+                phantomFactors(d, kind, tex, jop);
+                double phik = cell.electric_potential.re;
+                double[MAXF] phis;
+                foreach(io, face; cell.iface){
+                    if (face.is_on_boundary) {
+                        phis[io] = field_bcs[blkid][face.bc_id].phif(face);
+                    } else {
+                        auto other = (face.left_cell is cell) ? face.right_cell : face.left_cell;
+                        phis[io] = other.electric_potential.re;
+                    }
+                }
+                foreach (j; 0 .. nf)
+                    if (kind[j] == FK_SHEATH || kind[j] == FK_CIRCUIT)
+                        phis[j] = (1.0 - tex[j])*phik + tex[j]*((tex[j] != 0.0) ? phis[jop[j]] : 0.0);
+                double[3] g = [0.0, 0.0, 0.0];
+                foreach (j; 0 .. nf) {
+                    foreach (a; 0 .. nd) g[a] += W[a][j]*(slope[j] ? sg[j] : (phis[j] - phik));
+                }
+                cell.electric_field[0] = g[0];
+                cell.electric_field[1] = g[1];
+                cell.electric_field[2] = g[2];
             }
         }
     }
@@ -1720,7 +2244,22 @@ class ElectricField {
         writefln("    Current out: %f (A/m)", Iout);
 	}
 private:
-    immutable int nbands = 5; // 5 for a 2D structured grid
+    // Banded layout: one diagonal plus one band per face (5 in 2-D, 7 in 3-D), the diagonal
+    // in the middle (band 2 in 2-D, exactly the historical layout).
+    int nd = 2;          // spatial dimensions
+    int nf = 4;          // faces per cell
+    int nbands = 5;
+    int dband = 2;       // diagonal band
+    // Dimension-generic assembly (efieldstencil.d): always in 3-D; in 2-D only on request
+    // (LMR_EFIELD_GENERIC=1), to cross-check it against the established closed-form path.
+    bool generic = false;
+    // Generic path only: the Hall gate mode and the cross-diffusion columns (see
+    // assemble_generic). cross_terms adds the 12 edge neighbours of a hexahedral cell to
+    // every row (19 bands in 3-D); needed only when B can be misaligned with the grid.
+    int gate_mode = 0;
+    bool cross_terms = false;
+    int nedge = 0;
+    int[12] edgeA, edgeB;
     immutable bool precondition = true;
 
 

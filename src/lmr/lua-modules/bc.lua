@@ -667,7 +667,7 @@ end
 CircuitElectrode = FieldBoundary:new{node=0, sheath_model="linear",
                                      Rsheath=1.0, Vfall=0.0, K=1.0e-3, leak=1.0e-6, dV_lin=1.0, Jemit=0.0,
                                      segment_pitch=0.0, segment_fill=1.0, segment_x0=0.0,
-                                     segment_x1=0.0}
+                                     segment_x1=0.0, segment_z0=0.0, segment_z1=0.0}
 CircuitElectrode.name = "CircuitElectrode"
 function CircuitElectrode:new(o)
    o = FieldBoundary.new(self, o)
@@ -686,7 +686,9 @@ function CircuitElectrode:tojson()
    str = str .. string.format('"segment_pitch": %.18e, ', self.segment_pitch)
    str = str .. string.format('"segment_fill": %.18e, ', self.segment_fill)
    str = str .. string.format('"segment_x0": %.18e, ', self.segment_x0)
-   str = str .. string.format('"segment_x1": %.18e', self.segment_x1)
+   str = str .. string.format('"segment_x1": %.18e, ', self.segment_x1)
+   str = str .. string.format('"segment_z0": %.18e, ', self.segment_z0)
+   str = str .. string.format('"segment_z1": %.18e', self.segment_z1)
    str = str .. '}'
    return str
 end
@@ -705,7 +707,11 @@ SheathField = FieldBoundary:new{Velectrode=0.0, sheath_model="linear",
                                 -- magnet in a duct longer than the field. segment_x1 >
                                 -- segment_x0 confines the electrodes to [x0, x1]; 0 (the
                                 -- default) leaves them unbounded, as before.
-                                segment_x1=0.0}
+                                segment_x1=0.0,
+                                -- Spanwise (z) extent, 3-D: an electrode narrower than the
+                                -- duct depth occupies [segment_z0, segment_z1]; 0/0 (the
+                                -- default) spans the whole depth.
+                                segment_z0=0.0, segment_z1=0.0}
 SheathField.name = "SheathField"
 function SheathField:new(o)
    o = FieldBoundary.new(self, o)
@@ -729,7 +735,9 @@ function SheathField:tojson()
    str = str .. string.format('"Ex_cube": %.18e, ', self.Ex_cube)
    str = str .. string.format('"Ex_ramp_steps": %.18e, ', self.Ex_ramp_steps)
    str = str .. string.format('"Ex_ramp_start": %.18e, ', self.Ex_ramp_start)
-   str = str .. string.format('"segment_x1": %.18e', self.segment_x1)
+   str = str .. string.format('"segment_x1": %.18e, ', self.segment_x1)
+   str = str .. string.format('"segment_z0": %.18e, ', self.segment_z0)
+   str = str .. string.format('"segment_z1": %.18e', self.segment_z1)
    str = str .. '}'
    return str
 end
@@ -741,11 +749,29 @@ function FixedGradient_Test:new(o)
    return o
 end
 
-FixedField_Test = FieldBoundary:new()
+-- Dirichlet test boundary at an exact solution (verification only). fn = "exp_sin" (default,
+-- exp(x) sin(y)), "harmonic3d" (exp(sqrt(2) x) sin(y) cos(z)) or "linear"
+-- (phi0 + gx x + gy y + gz z, e.g. the J = 0 field (u x B).r) or "quadratic" (linear +
+-- (1/2) r.Q.r with qxx qyy qzz qxy qxz qyz; exact for a uniform tensor when sigma_S : Q = 0).
+FixedField_Test = FieldBoundary:new{fn="exp_sin", phi0=0.0, gx=0.0, gy=0.0, gz=0.0,
+                                    qxx=0.0, qyy=0.0, qzz=0.0, qxy=0.0, qxz=0.0, qyz=0.0}
 FixedField_Test.name = "FixedField_Test"
 function FixedField_Test:new(o)
    o = FieldBoundary.new(self, o)
    return o
+end
+function FixedField_Test:tojson()
+   local str = string.format(' {"name": "%s", ', self.name)
+   str = str .. string.format('"fn": "%s", ', self.fn)
+   str = str .. string.format('"phi0": %.18e, ', self.phi0)
+   str = str .. string.format('"gx": %.18e, ', self.gx)
+   str = str .. string.format('"gy": %.18e, ', self.gy)
+   str = str .. string.format('"gz": %.18e, ', self.gz)
+   for _, k in ipairs({"qxx", "qyy", "qzz", "qxy", "qxz", "qyz"}) do
+      str = str .. string.format('"%s": %.18e, ', k, self[k])
+   end
+   str = str .. '"end": 0}'
+   return str
 end
 
 -- Class for (complete) BoundaryCondition

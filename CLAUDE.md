@@ -243,7 +243,7 @@ refused in 3-D.
 - **The face measure** is `face_measure(face)`: the length in 2-D, the area in 3-D.
 - **The 3-D MHD source must be the D source** (`config.mhd_source`, vector Ohm's law, J x B,
   |J|^2/sigma). Where B = 0 it still applies the Joule heating of J = sigma E, as the 2-D
-  source does. Until bd932cac+1 it returned early and dropped it, which put a 9% F_x
+  source does. Until be3216c3 it returned early and dropped it, which put a 9% F_x
   error into an extrusion of a clipped-table case. The X2 Lua UDFs form J from E_x, E_y only, and miss the Joule heating of
   current along B. Zero the UDF's J x B and Joule and keep its radiation. The source box has
   `mhd_source_zmin/zmax` in 3-D.

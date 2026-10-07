@@ -380,20 +380,28 @@ class GMResFieldSolver {
     void solve_restarted(int n, int nb, double[] A, int[] Ai, double[] b, double[] x0,
                          double[] xf, int nmax_iter, bool verbose)
     {
-        immutable int m = GlobalConfig.electric_field_gmres_restart;
+        // The restart length GROWS when a cycle stagnates: a restarted GMRES whose basis is
+        // shorter than the iterations the system needs can stall indefinitely (measured: the
+        // 3-D field-map case needs ~670 iterations; GMRES(400) sat at 8.7e-5 for 4000).
+        // A cycle that reduces the residual by less than a factor 2 doubles m, up to the
+        // total iteration cap; the next cycle simply starts from the current solution.
+        int m = GlobalConfig.electric_field_gmres_restart;
         immutable double rtol = GlobalConfig.electric_field_gmres_rtol;
-        if (vr_m != m || vr_n != n) {
-            Vr.length = (m+1)*n; wr.length = n; rr.length = n;
-            Hr.length = (m+1)*m; cr.length = m; sr.length = m; gr.length = m+1; yr.length = m; hproj.length = m+1;
-            vr_m = m; vr_n = n;
+        void allocate(int mm) {
+            if (vr_m == mm && vr_n == n) return;
+            Vr.length = (mm+1)*n; wr.length = n; rr.length = n;
+            Hr.length = (mm+1)*mm; cr.length = mm; sr.length = mm; gr.length = mm+1; yr.length = mm; hproj.length = mm+1;
+            vr_m = mm; vr_n = n;
         }
+        if (vr_m > m && vr_n == n) m = vr_m;   // keep a length that an earlier solve had to grow to
+        allocate(m);
         xf[] = x0[];
         // preconditioned right-hand side norm, the reference for the relative tolerance
         rr[] = b[];
         if (use_ilu) iluApply(Mfact, rr);
         double bnorm = vector_norm(rr, n);
         if (bnorm == 0.0) { xf[] = 0.0; return; }
-        int total = 0;
+        int total = 0, cycles = 0;
         double resid = 1.0e300;
         bool converged = false;
         while (total < nmax_iter) {
@@ -463,10 +471,18 @@ class GMResFieldSolver {
                 double yi = yr[i];
                 foreach (p; 0 .. n) xf[p] += yi*Vr[i*n + p];
             }
+            cycles++;
             if (resid <= rtol*bnorm) { converged = true; break; }
+            // stagnation: less than a factor 2 this cycle -> longer basis for the next one
+            if (jj == m && resid > 0.5*beta && m < nmax_iter) {
+                int mnew = (2*m < nmax_iter) ? 2*m : nmax_iter;
+                if (verbose) writefln("    Restarted GMRES: cycle %d reduced the residual only %.2fx; restart length %d -> %d",
+                                      cycles, beta/resid, m, mnew);
+                m = mnew; allocate(m);
+            }
         }
-        if (verbose) writefln("    Restarted GMRES(%d): converged=%s  iters=%d/%d  rel. residual=%.3e (target %.1e)",
-                              m, converged, total, nmax_iter, resid/bnorm, rtol);
+        if (verbose) writefln("    Restarted GMRES(%d): converged=%s  iters=%d/%d  cycles=%d  rel. residual=%.3e (target %.1e)",
+                              m, converged, total, nmax_iter, cycles, resid/bnorm, rtol);
         if (!converged) {
             writefln("    Restarted GMRES(%d) did NOT converge: %d iterations, rel. residual %.3e (target %.1e)",
                      m, total, resid/bnorm, rtol);

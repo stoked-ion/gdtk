@@ -241,6 +241,19 @@ refused in 3-D.
   GMRES(40) sat at a relative residual of 2.6e-6 after 12000 iterations where full GMRES
   needs ~290. Use m at or above the needed iteration count (400). Memory is (m+1) x N per
   rank, and the solution is formed once per cycle, not every iteration.
+  - **The restart length grows on stagnation.** A cycle that cuts the residual by less
+    than 2x doubles m, up to the iteration cap, and the grown length is kept for later
+    solves. The needed count depends on the flow state, not just the grid. On the
+    new-rig coarse map case (35k cells) the initial flow needs ~210 iterations, but the
+    converged flow at field switch-on needs ~670. Fixed GMRES(400) stalled there at
+    8.7e-5, and the run died at its first field solve. With growth it converges in 1421
+    iterations (400 -> 800), against 671 for unrestarted GMRES.
+  - Gram-Schmidt is classical with one reorthogonalisation (CGS2): two global reductions
+    per iteration for the projections (plus the norm), not j+1.
+  - **The reversed-field lobe is what makes the map case hard.** At the same state, the
+    map clipped at its reversal (`applied_B_map_clip_reversed`) converges in 197
+    iterations. Clipping is a modelling change, though. Keep the unclipped map, which is
+    correct in 3-D because the tensor only flips b-hat.
 
 Verification (`Argon-ABLE/E3D/`, `E3D/ftest/`):
 - **2-D:** the generic path reproduces the 2-D path through a whole coupled NK run (F_x

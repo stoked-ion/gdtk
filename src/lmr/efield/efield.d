@@ -210,6 +210,18 @@ class ElectricField {
                         if (generic) {
                             Vector3 Bf = appliedBVecAt(face.pos.x.re, face.pos.y.re, face.pos.z.re);
                             double bm = sqrt(Bf.x.re^^2 + Bf.y.re^^2 + Bf.z.re^^2);
+                            if (bm == 0.0 && nd == 3) {
+                                // No field at the wall face (e.g. a clipped table's B = 0 zone):
+                                // judge by the field at the cell centre, and with no field there
+                                // either there is no Hall effect to gate. Marking such a cell
+                                // anyway (as before) gated the Hall term on its other faces, where
+                                // B is not zero: at the edge of a B = 0 zone the side-wall layers
+                                // then lost their Hall current and the interior layers kept it, a
+                                // spurious 0.33 V variation across a z-uniform extrusion.
+                                Bf = appliedBVecAt(cell.pos[0].x.re, cell.pos[0].y.re, cell.pos[0].z.re);
+                                bm = sqrt(Bf.x.re^^2 + Bf.y.re^^2 + Bf.z.re^^2);
+                                if (bm == 0.0) continue;
+                            }
                             if (bm > 0.0) {
                                 double cx = face.n.y.re*Bf.z.re - face.n.z.re*Bf.y.re;
                                 double cy = face.n.z.re*Bf.x.re - face.n.x.re*Bf.z.re;

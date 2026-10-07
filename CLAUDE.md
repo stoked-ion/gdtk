@@ -228,6 +228,12 @@ refused in 3-D.
   - `legacy` (default): the 2-D central gate exactly. Boundary and wall-layer faces get the
     unmagnetised sigma, insulating walls get dphi/dn = 0, and electrode phantoms are a
     mirror. A wall normal to B (a 3-D side wall) is not gated.
+    - Where B = 0 at the wall face (e.g. a clipped table), the field at the cell centre
+      decides, and with no field there the cell is not gated.
+    - Before this rule, such cells were gated on their other faces too. At the edge of a
+      B = 0 zone the side-wall layers then lost their Hall current and the interior ones
+      kept it: 0.33 V of spurious variation across a z-uniform extrusion, and F_x +10% vs
+      2-D.
   - `rotation`: drops only the Hall rotation there, and makes the insulator condition the
     tensor J.n = 0, an oblique slope row. **Required with a field map:** `legacy` gates
     every tilted side-wall cell to an isotropic sigma, a short circuit.

@@ -205,14 +205,25 @@ refused in 3-D.
   (x/y/z in 3-D), or from `config.applied_B_map`. The tensor is
   `sigma b b + sigma_P (I - b b) + sigma_H [b]x`. The new 3-D physics is conduction along B
   at the full sigma, about 1+beta^2 (~250 at condition 6) times sigma_P.
-- **Cross-diffusion** (`cross_terms`, 19 bands): automatic with a map, or force it with
-  `config.electric_field_cross_terms`. With b tilted from the grid axes, the symmetric part
-  of the tensor has off-diagonal terms. Applying the hybrid stencil's remainder to the
-  cell's OWN centre gradient (the 2-D scheme) cancels them exactly in the net flux.
-  Measured: a tilted-tensor exact solution did not converge at all (order 0.0). It is
-  therefore applied to a face gradient, half from the neighbour's tangential differences
-  through the 12 edge neighbours; that converges at second order (order 1.83). The Hall
-  (antisymmetric) remainder keeps the cell gradient, as in 2-D.
+- **Face-averaged tangential gradient** (`cross_terms`; 19 bands in 3-D, 9 in 2-D; always
+  on in the generic path). Applying the hybrid stencil's non-orthogonal remainder to the
+  cell's OWN gradient, as the 2-D scheme does, cancels it between the cell's opposite
+  faces. That drops two things:
+  - the symmetric off-diagonal terms of a tilted tensor. Measured: a tilted-tensor exact
+    solution had order 0.0;
+  - on a NON-ORTHOGONAL grid, the non-orthogonal correction itself, even for an isotropic
+    sigma.
+  The symmetric part of m is therefore written exactly in the basis {eh, v_1, v_2}:
+  - eh is the centre-to-centre line, and its part goes into the two-point difference;
+  - v_i is the direction of the neighbour's 3-point derivative through the edge
+    neighbours, and its part is split half onto each cell's gradient.
+  A plain projection onto the v_i is only right when they are orthonormal and normal to
+  eh, i.e. on an orthogonal grid; on a skewed one it left an O(1) error. **The Hall part
+  goes wholly on the cell's own gradient.** Summed over a closed cell, that is exactly
+  `(grad sigma_H x b).grad phi`, which is zero for uniform sigma_H. On a skewed face the
+  Hall part has a component along eh, and as a two-point difference it does not cancel.
+  On orthogonal grids none of this changes anything: every earlier test reproduces to all
+  digits.
 - **`config.electric_field_hall_gate`:**
   - `legacy` (default): the 2-D central gate exactly. Boundary and wall-layer faces get the
     unmagnetised sigma, insulating walls get dphi/dn = 0, and electrode phantoms are a
@@ -266,6 +277,27 @@ Verification (`Argon-ABLE/E3D/`, `E3D/ftest/`):
 - **Field-only:** harmonic 3-D converges at second order; the exact J = 0 field
   phi = (u x B).r is reproduced to 1e-13 with a tilted tensor, in every gate mode; shared
   memory and MPI agree to 7e-12 with cross terms on.
+- **Skewed grids** (`E3D/ftest/gen_skew.py`, `gen_skew2d.py`): a TFI box whose y-walls
+  diverge along x, like the new rig's expansion block.
+  - 3-D: harmonic orders 1.86/1.95; tilted-tensor quadratic 1.53/1.81; B-along-z quadratic
+    1.46/1.80.
+  - Linear and J = 0 fields are exact to 1e-13, with insulating or sheath (no metal) walls.
+  - Before the fix all three quadratic/harmonic cases had order ~0.
+  - The first coupled 3-D run on the new rig grew a 100 V potential mode along B near the
+    diverging walls (19 MW/m of Joule heat, Te to the 500 kK clamp) from exactly this.
+
+**Latent 2-D defect, not fixed: the 2-D path is inconsistent on non-orthogonal cells.**
+On a skewed quadrilateral (`ex2dsk*`), phi = exp(x) sin y for uniform sigma:
+- isotropic: RMS 8.9e-3 -> 8.4e-3 -> 8.3e-3 from 8^2 to 32^2 (no convergence);
+- beta = 4: the gradient error reaches 230%.
+The generic path (`LMR_EFIELD_GENERIC=1`) converges at second order on the same grids
+(1.91/1.97; with Hall and no gate the same numbers, since a uniform Hall term then
+contributes exactly zero per cell).
+- Unaffected (scanned every prepped case, 2026-10-08): every rectangular grid, whatever
+  the clustering. That is X2-PFE (condition 6), the gap studies, C1/C2, CONSTE, FROZENE,
+  NARROW, the Hall studies and the air cases.
+- Affected: grids with skewed cells. These are GEOM-MODES (the new rig, 12 deg in its
+  diverging section x > 200 mm, 70 cases), SIMPLE/h_dio_* and X2-SHIM/SHORT.
 
 **Latent 2-D bug, not fixed:** lmr's face order is west, east, south, north (bottom, top),
 the `Face` enum, so the 2-D phantom-point pairing `(j+2)%4` picks a PERPENDICULAR face.

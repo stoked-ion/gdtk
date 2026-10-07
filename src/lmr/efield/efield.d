@@ -57,8 +57,16 @@ class ElectricField {
             if (!generic && gate_mode != GATE_LEGACY)
                 throw new Error("config.electric_field_hall_gate other than \"legacy\" needs the generic (3-D) field solve.");
         }
-        if (generic && nd == 3)
-            cross_terms = (GlobalConfig.applied_B_map_nx > 0) || GlobalConfig.electric_field_cross_terms;
+        // Always in 3-D: the face-averaged tangential gradient is what makes the scheme
+        // consistent on a NON-ORTHOGONAL grid even for an isotropic sigma (applying the
+        // non-orthogonal remainder to the cell's own gradient cancels it between opposite
+        // faces: measured, a harmonic field on a skewed box did not converge, RMS 8.9e-3 ->
+        // 8.2e-3 -> 8.2e-3 from 8^3 to 32^3), as well as for a field tilted from the grid.
+        // On an orthogonal grid with an aligned field the extra columns are zero. The same
+        // holds in 2-D (4 corner neighbours, 9 bands): the established 2-D path does NOT
+        // converge on a skewed quadrilateral (harmonic: RMS 8.9e-3 -> 8.3e-3 from 8^2 to 32^2;
+        // with beta = 4 the gradient error reaches 230%), the generic path with these terms does.
+        if (generic) cross_terms = true;
         // Verification only: LMR_EFIELD_NOCROSS=1 removes the cross-diffusion columns, to
         // measure what they do.
         if (environment.get("LMR_EFIELD_NOCROSS", "0") == "1") cross_terms = false;
@@ -1953,11 +1961,18 @@ class ElectricField {
                     double[3] msym = tensorTransposeDotN(sigmaF, beta, bh, nF, false);
 
                     double fac = (eh[0]*nF[0] + eh[1]*nF[1] + eh[2]*nF[2])/emag;   // unfolded, for BC direct terms
-                    double mdote = eh[0]*m[0] + eh[1]*m[1] + eh[2]*m[2];
-                    double[3] sv = [m[0] - eh[0]*mdote, m[1] - eh[1]*mdote, m[2] - eh[2]*mdote];
-                    double sfac = mdote/emag;
-                    // the symmetric remainder, for the cross-diffusion treatment below
+                    // The two-point difference carries only the SYMMETRIC part along eh; the
+                    // Hall (antisymmetric) part goes wholly on this cell's gradient. Summed over
+                    // a closed cell that is exactly (sum_f S sigma_H n_f x b).grad phi_k, i.e. zero
+                    // for uniform sigma_H and (grad sigma_H x b).grad phi for a varying one -- the
+                    // analytic div J_H. A Hall component along eh, which a skewed face has
+                    // (eh not parallel to n), would otherwise enter as a face-centred
+                    // difference that does not cancel: an O(1) truncation error. On an
+                    // orthogonal grid eh.(n x b) = 0 and nothing changes.
                     double msde = eh[0]*msym[0] + eh[1]*msym[1] + eh[2]*msym[2];
+                    double[3] sv = [m[0] - eh[0]*msde, m[1] - eh[1]*msde, m[2] - eh[2]*msde];
+                    double sfac = msde/emag;
+                    // the symmetric remainder, for the cross-diffusion treatment below
                     double[3] svs = [msym[0] - eh[0]*msde, msym[1] - eh[1]*msde, msym[2] - eh[2]*msde];
 
                     // PART ONE: the direct (two-point) contribution, and the boundary terms.
@@ -2019,13 +2034,26 @@ class ElectricField {
                         crossFace = true;
                     }
 
-                    // Cross-diffusion: half of the symmetric remainder goes to the neighbour's
-                    // tangential derivatives (through the edge neighbours), half stays on this
-                    // cell's reconstruction, per tangential axis. Where a needed edge neighbour
-                    // does not exist the whole of that component stays on this cell.
+                    // Cross-diffusion. The symmetric part of m is written EXACTLY in the basis
+                    // {eh, v_1, v_2}: eh the cell-to-neighbour line, v_i the direction of the
+                    // neighbour's 3-point derivative through its edge neighbours along each
+                    // tangential axis. The eh part goes into the two-point difference; each v_i
+                    // part is split half onto this cell's reconstructed gradient and half onto
+                    // the neighbour's 3-point derivative, i.e. the face value is the average of
+                    // the two cells'. The halves on this cell's gradient cancel between its
+                    // opposite faces, so the neighbour halves must carry exactly half of the
+                    // tangential part for the cross derivatives to survive -- which a plain
+                    // projection onto the v_i does only when they are orthonormal and normal to
+                    // eh. On a skewed grid they are not, and the projection left an O(1)
+                    // truncation error (a tilted-tensor quadratic did not converge, RMS 5.6e-2 ->
+                    // 5.2e-2 from 8^3 to 16^3). On an orthogonal grid this is the projection.
+                    // A tangential axis without both edge neighbours keeps its part on this
+                    // cell (a boundary closure), along w = eh x v_1 or the plane normal to eh.
                     double[3] svk = sv;   // what is applied to this cell's own gradient
                     if (cross_terms && crossFace) {
                         immutable int ax = faceAxis(to!int(io));
+                        int na = 0;
+                        int[2] epa, ema; double[2] wpa, wma; double[3][2] v;
                         foreach (jt; 0 .. nf) {
                             if (faceAxis(jt) == ax) continue;
                             if ((jt & 1) == 0) continue;   // one '+' face (east, north, top) per tangential axis
@@ -2038,20 +2066,55 @@ class ElectricField {
                             double[3] dm = [pn[0] - epos[em].x.re, pn[1] - epos[em].y.re, pn[2] - epos[em].z.re];
                             double hp = sqrt(dp[0]^^2 + dp[1]^^2 + dp[2]^^2), hm = sqrt(dm[0]^^2 + dm[1]^^2 + dm[2]^^2);
                             if (!(hp > 0.0 && hm > 0.0)) continue;
-                            double[3] t = [(dp[0] + dm[0])/(hp + hm), (dp[1] + dm[1])/(hp + hm), (dp[2] + dm[2])/(hp + hm)];
-                            double tn = sqrt(t[0]^^2 + t[1]^^2 + t[2]^^2);
-                            foreach (a; 0 .. 3) t[a] /= tn;
-                            double c = svs[0]*t[0] + svs[1]*t[1] + svs[2]*t[2];   // the symmetric component along t
-                            if (c == 0.0) continue;
-                            // move half of it off this cell's gradient ...
-                            foreach (a; 0 .. 3) svk[a] -= 0.5*c*t[a];
-                            // ... onto the neighbour's 3-point derivative along t
                             double den = hp*hm*(hp + hm);
                             double wp = hm*hm/den, wm = -hp*hp/den;
-                            double q = 0.5*S*c;
-                            A[k*nbands + nf + 1 + ep] += q*wp;
-                            A[k*nbands + nf + 1 + em] += q*wm;
-                            A[k*nbands + band]        += -q*(wp + wm);
+                            // wp (phi_ep - phi_n) + wm (phi_em - phi_n) = g.(wp dp - wm dm) for a
+                            // linear field: v is the direction it differentiates along (a unit
+                            // vector when the three points are collinear)
+                            foreach (a; 0 .. 3) v[na][a] = wp*dp[a] - wm*dm[a];
+                            epa[na] = ep; ema[na] = em; wpa[na] = wp; wma[na] = wm; na++;
+                        }
+                        if (na > 0) {
+                            // complete the basis: [eh, v_1, v_2] or [eh, v_1, w]
+                            double[3] c2;
+                            if (na == 2) c2 = v[1];
+                            else {
+                                c2 = [eh[1]*v[0][2] - eh[2]*v[0][1], eh[2]*v[0][0] - eh[0]*v[0][2], eh[0]*v[0][1] - eh[1]*v[0][0]];
+                                double cn = sqrt(c2[0]^^2 + c2[1]^^2 + c2[2]^^2);
+                                foreach (a; 0 .. 3) c2[a] /= cn;
+                            }
+                            // solve [eh v_1 c2] mu = msym by Cramer's rule
+                            double[3] c1 = v[0];
+                            static double det3(const double[3] p, const double[3] q, const double[3] r) {
+                                return p[0]*(q[1]*r[2] - q[2]*r[1]) - q[0]*(p[1]*r[2] - p[2]*r[1]) + r[0]*(p[1]*q[2] - p[2]*q[1]);
+                            }
+                            double D0 = det3(eh, c1, c2);
+                            double scale = sqrt(c1[0]^^2 + c1[1]^^2 + c1[2]^^2)*sqrt(c2[0]^^2 + c2[1]^^2 + c2[2]^^2);
+                            if (fabs(D0) > 1.0e-6*scale) {
+                                double mu_e = det3(msym, c1, c2)/D0;
+                                double mu_1 = det3(eh, msym, c2)/D0;
+                                double mu_2 = det3(eh, c1, msym)/D0;
+                                // the eh part: two-point, replacing eh.msym already stamped
+                                double dsf = (mu_e - msde)/emag;
+                                A[k*nbands + dband] += -1.0*S*dsf;
+                                A[k*nbands + band]  +=  1.0*S*dsf;
+                                // own gradient: the Hall remainder, half of each v_i part, and
+                                // all of a w part (no neighbour derivative along it)
+                                double[2] mu = [mu_1, (na == 2) ? mu_2 : 0.0];
+                                foreach (a; 0 .. 3) {
+                                    svk[a] = (sv[a] - svs[a]) + 0.5*mu[0]*c1[a];
+                                    if (na == 2) svk[a] += 0.5*mu[1]*c2[a];
+                                    else         svk[a] += mu_2*c2[a];
+                                }
+                                // neighbour halves: its 3-point derivatives along v_i
+                                foreach (i; 0 .. na) {
+                                    double q = 0.5*S*mu[i];
+                                    if (q == 0.0) continue;
+                                    A[k*nbands + nf + 1 + epa[i]] += q*wpa[i];
+                                    A[k*nbands + nf + 1 + ema[i]] += q*wma[i];
+                                    A[k*nbands + band]            += -q*(wpa[i] + wma[i]);
+                                }
+                            }
                         }
                     }
 

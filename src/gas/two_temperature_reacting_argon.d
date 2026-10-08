@@ -137,13 +137,44 @@ public:
         Q.u = 3.0/2.0*_Rgas*Q.T;
         Q.u_modes[0] = 3.0/2.0*_Rgas*alpha*Q.T_modes[0] + alpha*_Rgas*_theta_ion;
     }
+    // The (p,s) and (h,s) updates are for an isentrope at FROZEN composition along which
+    // the electrons stay in equilibrium with the heavy particles (Te = T). That is what a
+    // stagnation inflow needs: InFlowBC_FromStagnation freezes the stagnation composition
+    // and expands it isentropically to the inflow face. With Te = T both species are ideal
+    // monatomic gases, so h = (5/2) R (1+alpha) T + alpha R theta_ion and, from entropy()
+    // below, s = R (1+alpha) ((3/2) ln T - ln rho).
     override void update_thermo_from_ps(ref GasState Q, number s) const
     {
-        throw new GasModelException("update_thermo_from_ps not implemented.");
+        number alpha = ionisation_fraction_from_mass_fractions(Q);
+        if (Q.p <= 0.0) {
+            string msg = "Pressure was negative for update_thermo_from_ps.";
+            debug { msg ~= format("\nQ=%s\n", Q); }
+            throw new GasModelException(msg);
+        }
+        number R1 = _Rgas*(1.0 + alpha);
+        // s/R1 = (3/2) ln T - ln(p/(R1 T)) = (5/2) ln T - ln p + ln R1
+        Q.T = exp((s/R1 + log(Q.p) - log(R1))/2.5);
+        Q.T_modes[0] = Q.T;
+        Q.rho = Q.p/(R1*Q.T);
+        Q.u = 3.0/2.0*_Rgas*Q.T;
+        Q.u_modes[0] = 3.0/2.0*_Rgas*alpha*Q.T + alpha*_Rgas*_theta_ion;
     }
     override void update_thermo_from_hs(ref GasState Q, number h, number s) const
     {
-        throw new GasModelException("update_thermo_from_hs not implemented.");
+        number alpha = ionisation_fraction_from_mass_fractions(Q);
+        number R1 = _Rgas*(1.0 + alpha);
+        number T = (h - alpha*_Rgas*_theta_ion)/(2.5*R1);
+        if (T <= 0.0) {
+            string msg = "Enthalpy too low for update_thermo_from_hs (T <= 0).";
+            debug { msg ~= format("\nh=%s Q=%s\n", h, Q); }
+            throw new GasModelException(msg);
+        }
+        Q.T = T;
+        Q.T_modes[0] = T;
+        Q.rho = exp(1.5*log(T) - s/R1);
+        Q.p = Q.rho*R1*T;
+        Q.u = 3.0/2.0*_Rgas*T;
+        Q.u_modes[0] = 3.0/2.0*_Rgas*alpha*T + alpha*_Rgas*_theta_ion;
     }
     override void update_sound_speed(ref GasState Q) const
     {
@@ -235,7 +266,15 @@ public:
     }
     override number entropy(in GasState Q) const
     {
-        throw new GasModelException("entropy not implemented in TwoTemperatureReactingArgon.");
+        // Specific entropy at frozen composition, to an additive constant (the mixing and
+        // reference terms, which are constant at fixed composition and cancel in every use).
+        // Heavy particles (atoms and ions, partial pressure rho R T) and electrons (partial
+        // pressure rho R alpha Te) are each ideal monatomic gases:
+        //     s = R ((3/2) ln T - ln rho) + alpha R ((3/2) ln Te - ln rho)
+        number alpha = ionisation_fraction_from_mass_fractions(Q);
+        number s = _Rgas*(1.5*log(Q.T) - log(Q.rho));
+        if (alpha > 0.0) { s += alpha*_Rgas*(1.5*log(Q.T_modes[0]) - log(Q.rho)); }
+        return s;
     }
 
     override void balance_charge(ref GasState Q) const
@@ -331,4 +370,32 @@ unittest {
     // heavy-particle conductivity. The exact value depends on the collision
     // cross-section fits; bracket it rather than pinning the fit constants.
     assert(gd.k_modes[0] > 0.1 && gd.k_modes[0] < 10.0);
+
+    // Frozen isentrope, as InFlowBC_FromStagnation uses it: a 9000 K, 0.105 MPa stagnation
+    // state (the Tokyo Tech HIP generator plenum) at 0.5% ionisation.
+    gd.p = 0.105e6;
+    gd.T = 9000.0;
+    gd.T_modes[0] = 9000.0;
+    gd.massf[Species.Ar_plus] = 0.005;
+    gd.massf[Species.Ar] = 1.0 - gd.massf[Species.Ar_plus];
+    gm.balance_charge(gd);
+    gd.massf[Species.Ar] = 1.0 - gd.massf[Species.Ar_plus] - gd.massf[Species.e_minus];
+    gm.update_thermo_from_pT(gd);
+    number h0 = gm.enthalpy(gd);
+    number s0 = gm.entropy(gd);
+    auto g2 = GasState(gd);
+    // (h0, s0) returns the stagnation state itself
+    gm.update_thermo_from_hs(g2, h0, s0);
+    assert(isClose(g2.T, 9000.0, 1.0e-10) && isClose(g2.p, 0.105e6, 1.0e-10));
+    // expanded to 1500 m/s: p/p0 = (T/T0)^(5/2) for a monatomic ideal gas, entropy unchanged
+    gm.update_thermo_from_hs(g2, h0 - 0.5*1500.0^^2, s0);
+    assert(g2.T < 9000.0 && isClose(g2.T_modes[0], g2.T, 1.0e-12));
+    assert(isClose(g2.p/0.105e6, (g2.T/9000.0)^^2.5, 1.0e-10));
+    assert(isClose(gm.entropy(g2), s0, 1.0e-12));
+    assert(isClose(gm.enthalpy(g2), h0 - 0.5*1500.0^^2, 1.0e-12));
+    // (p, s) on the same isentrope
+    auto g3 = GasState(gd);
+    g3.p = g2.p;
+    gm.update_thermo_from_ps(g3, s0);
+    assert(isClose(g3.T, g2.T, 1.0e-10) && isClose(g3.rho, g2.rho, 1.0e-10));
 }

@@ -1375,7 +1375,11 @@ final class GlobalConfig {
     // for viscous fluxes. The old, Eilmer3-compatible settings were
     // SpatialDerivCalc.divergence and SpatialDerivLocn.vertices.
     shared static bool include_ghost_cells_in_spatial_deriv_clouds = true;
-    shared static bool include_boundary_faces_in_spatial_deriv_correction = false;
+    // 2026-10-08: default true on gdtk-mhd. With false, a boundary face's gradient is a copy of
+    // the wall cell's centre gradient, which is first order with a large constant: the
+    // Hartmann-flow profile error is 8.9% (20 cells) against 1.1% with the correction.
+    // Upstream turns it on in its own heat-flux and skin-friction examples.
+    shared static bool include_boundary_faces_in_spatial_deriv_correction = true;
     shared static bool upwind_vertex_gradients = true;
     // We may elect to suppress the calculation of gradients in particular zones.
     static BlockZone[] suppress_viscous_stresses_zones;

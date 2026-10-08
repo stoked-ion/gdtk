@@ -313,8 +313,15 @@ Verification (`Argon-ABLE/E3D/`, `E3D/ftest/`):
     layer.
   - With `= true` it is 1.1%. An ideal second-order finite-volume scheme on the same grid
     gives 1.4%.
-  - No viscous production case on this branch set it. Low-Mach viscous runs also need
-    `inviscid_cfl_only = true` and a free auto-CFL.
+  - **Since 2026-10-08 `true` is the lmr default on this branch** (`globalconfig.d` and
+    `globalconfig.lua`). It takes effect at PREP time, so a case prepped earlier keeps
+    `false` in its config until re-prepped. A re-prepped Hartmann case reproduces the
+    explicit-flag run digit for digit. At open boundaries (which copy the cell state to the
+    face) it imposes a zero normal derivative; at slip walls zero shear and heat flux.
+  - What it moves: the viscous C6 tare (`NEXT/C6_visc_tare`, 80x60, 300 K walls) goes from
+    -431.1 to -489.7 N/m of momentum-flux loss (+13.6%). **Every viscous tare before
+    2026-10-08 under-states the viscous loss by roughly this much.**
+  - Low-Mach viscous runs also need `inviscid_cfl_only = true` and a free auto-CFL.
 - **Grid study on condition 6** (250 V, inviscid). F_x is +76.8231 / +76.4579 / +76.9687
   N/m on 40x15 / 80x30 / 160x60. That is non-monotone, so not yet asymptotic: about +-0.7%
   discretisation uncertainty.

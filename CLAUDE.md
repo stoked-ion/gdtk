@@ -302,6 +302,22 @@ Verification (`Argon-ABLE/E3D/`, `E3D/ftest/`):
     copy-extrapolated outflow cell (alternating, decaying within a few cells upstream).
   - Real-valued binaries are useless with `frechet_derivative_perturbation = 1e-30` (it
     needs the complex lmrZ build).
+- **Hartmann flow** (`VERIF/hartmann/`, 3-D, B normal to no-slip insulating walls, shorted
+  conducting side walls, Ha = 9.95).
+  - The field solve is exact: E_z <= 1e-5 V/m. -dp/dx matches the Hartmann formula to
+    0.04% (20 cells).
+  - The profile error is set by lmr's viscous WALL gradient, not by the MHD terms. With
+    the default `include_boundary_faces_in_spatial_deriv_correction = false` the
+    wall-face gradient is the wall cell's centre gradient, which is first order with a
+    large constant: 8.8% at 20 cells and 4.5% at 40, with three cells across the Hartmann
+    layer.
+  - With `= true` it is 1.1%. An ideal second-order finite-volume scheme on the same grid
+    gives 1.4%.
+  - No viscous production case on this branch set it. Low-Mach viscous runs also need
+    `inviscid_cfl_only = true` and a free auto-CFL.
+- **Grid study on condition 6** (250 V, inviscid). F_x is +76.8231 / +76.4579 / +76.9687
+  N/m on 40x15 / 80x30 / 160x60. That is non-monotone, so not yet asymptotic: about +-0.7%
+  discretisation uncertainty.
 - **Extrusion:** the 3-D extrusion of that coupled case (8 MPI ranks) gives the same F_x
   per metre of depth to 2.5e-10.
 - **Rotation:** a 90 deg rotation about x (electrodes on the z-walls, B along -y) gives the

@@ -1282,6 +1282,7 @@ void performNewtonKrylovUpdates(int snapshotStart, double startCFL, int maxCPUs,
         // it needs this. Nothing in the steady path reads SimState.step, so publishing it
         // cannot change existing behaviour.
         SimState.step = step;
+        updateAppliedBScale(step);
         // 0a. change of phase
         stepsIntoCurrentPhase++;
         startOfNewPhase = false;

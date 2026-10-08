@@ -505,6 +505,7 @@ int integrateInTime(double targetTimeAsRequested)
 
             // 3.0 Update the time record and (occasionally) print status.
             SimState.step = SimState.step + 1;
+            updateAppliedBScale(SimState.step);
             if (GlobalConfig.is_master_task) {
                 try {
                     std.file.write(lmrCfg.progFile, format("%d\n", SimState.step));

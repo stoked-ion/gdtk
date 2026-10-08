@@ -1242,6 +1242,17 @@ final class GlobalConfig {
     shared static double applied_B_ramp = 0.0;  // 0 => uniform, as before
     shared static double applied_B_x0 = 0.0;    // upstream edge of the magnet
     shared static double applied_B_x1 = 0.0;    // downstream edge
+    // FIELD CONTINUATION: a step-based ramp of the whole applied field, B -> f(step) B with
+    // f = f0 + (1 - f0)*smoothstep((step - start)/steps), f0 = applied_B_scale_start.
+    // Switching a strong interaction on at full field meets the high Hall parameter of the
+    // undisturbed flow (a generator's supersonic core at beta ~ 30); raising B lets the flow
+    // decelerate and densify as beta grows. Applies to every consumer of appliedBzAt /
+    // appliedBVecAt (field solve, Hall parameter, MHD source, UDF table, snapshot output).
+    // applied_B_scale_ramp_steps = 0 (the default) leaves the scale at exactly 1.0.
+    shared static double applied_B_scale_start = 1.0;
+    shared static int applied_B_scale_ramp_start = 0;
+    shared static int applied_B_scale_ramp_steps = 0;
+    shared static double applied_B_scale = 1.0;     // runtime value, set by updateAppliedBScale
     // Built-in low-Rm MHD source (efield/efieldsource.d): the Lorentz force J x B and
     // the Joule heating from the solved field, in D rather than in a Lua UDF, so that
     // they are evaluated in `number` arithmetic and enter the Newton Jacobian. Off by
@@ -2218,6 +2229,9 @@ void set_config_for_core(JSONValue jsonData)
     mixin(update_double("applied_B_ramp", "applied_B_ramp"));
     mixin(update_double("applied_B_x0", "applied_B_x0"));
     mixin(update_double("applied_B_x1", "applied_B_x1"));
+    mixin(update_double("applied_B_scale_start", "applied_B_scale_start"));
+    mixin(update_int("applied_B_scale_ramp_start", "applied_B_scale_ramp_start"));
+    mixin(update_int("applied_B_scale_ramp_steps", "applied_B_scale_ramp_steps"));
     mixin(update_bool("mhd_source", "mhd_source"));
     mixin(update_double("mhd_source_xmin", "mhd_source_xmin"));
     mixin(update_double("mhd_source_xmax", "mhd_source_xmax"));
@@ -3050,8 +3064,31 @@ void registerGlobalConfig(lua_State* L)
  * inside the last cells. Letting B fall off before the boundary removes the concentration
  * instead of merely resolving it, and is what the hardware actually does.
  */
+/**
+ * Set GlobalConfig.applied_B_scale for this step (see applied_B_scale_start). Called by the
+ * steady and transient loops wherever they publish SimState.step. Exactly 1.0 when no ramp
+ * is configured, so the multiplication in appliedBzAt is then an identity.
+ */
+@nogc
+void updateAppliedBScale(int step)
+{
+    immutable int n = GlobalConfig.applied_B_scale_ramp_steps;
+    if (n <= 0) { GlobalConfig.applied_B_scale = 1.0; return; }
+    double s = (step - GlobalConfig.applied_B_scale_ramp_start)/cast(double) n;
+    if (s < 0.0) s = 0.0;
+    if (s > 1.0) s = 1.0;
+    immutable double f0 = GlobalConfig.applied_B_scale_start;
+    GlobalConfig.applied_B_scale = f0 + (1.0 - f0)*s*s*(3.0 - 2.0*s);
+}
+
 @nogc
 double appliedBzAt(double x)
+{
+    return GlobalConfig.applied_B_scale*appliedBzProfile(x);
+}
+
+@nogc
+double appliedBzProfile(double x)
 {
     // Tabulated profile wins when present.
     int n = GlobalConfig.applied_B_tab_n;
@@ -3173,7 +3210,8 @@ Vector3 appliedBVecAt(double x, double y, double z)
             return (1.0-wi)*(1.0-wj)*b[j0*nx + i0] + wi*(1.0-wj)*b[j0*nx + i0 + 1]
                  + (1.0-wi)*wj*b[(j0+1)*nx + i0] + wi*wj*b[(j0+1)*nx + i0 + 1];
         }
-        double b1 = bilin(appliedBMapB1), b2 = bilin(appliedBMapB2);
+        double b1 = GlobalConfig.applied_B_scale*bilin(appliedBMapB1);
+        double b2 = GlobalConfig.applied_B_scale*bilin(appliedBMapB2);
         return xz ? Vector3(b1, 0.0, b2) : Vector3(b1, b2, 0.0);
     }
     double B = appliedBzAt(x);

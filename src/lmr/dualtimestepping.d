@@ -508,6 +508,7 @@ void performDualTimeNewtonKrylovUpdates(int snapshotStart, double startCFL, int 
 
         // we need to evaluate time-dependent boundary conditions and source terms at the future state
         SimState.step = SimState.step + 1;
+        updateAppliedBScale(SimState.step);
         SimState.time = SimState.time + dtsController.dt;
         if (SimState.step >= dtsController.bdfStartupSteps) { dtsController.bdfOrder = dtsController.targetBdfOrder; }
 

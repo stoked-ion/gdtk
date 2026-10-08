@@ -1391,12 +1391,27 @@ class ElectricField {
 
             // K+1 solves of the UNMODIFIED banded system. The preconditioner is built
             // once above and reused for all of them.
+            if (schur_warm.length != K + 1) {
+                schur_warm.length = K + 1;
+                foreach (ref w; schur_warm) { w.length = N; w[] = 0.0; }
+            }
+            size_t schur_call = 0;
             auto solveA0 = delegate double[](const(double)[] rhs) {
                 auto rr = new double[N];
                 foreach (i; 0 .. N) rr[i] = rhs[i];
                 auto xx = new double[N];
-                auto x0 = new double[N]; x0[] = 0.0;
+                auto x0 = new double[N];
+                // Warm start from this call's solution at the previous field solve. Only the
+                // restarted solver's test is relative to ||M^-1 b||; the original solver keeps
+                // its zero start.
+                if (GlobalConfig.electric_field_gmres_restart > 0 && schur_call < schur_warm.length) {
+                    x0[] = schur_warm[schur_call][];
+                } else {
+                    x0[] = 0.0;
+                }
                 gmres.solve(N, nbands, A, Ai, rr, x0, xx, max_iter, false);
+                if (schur_call < schur_warm.length) schur_warm[schur_call][] = xx[];
+                schur_call++;
                 return xx;
             };
             void delegate(double[]) reducer = null;
@@ -2390,6 +2405,11 @@ private:
     double[][] Uc, Wt;            // [K][N] border blocks of the augmented system
     double[] Lmat, cvec;          // K*K row-major, and length K
     int circuit_solve_count = 0;
+    // Warm starts for the K+1 banded solves of the Schur path, in schurSolve's call order
+    // (the K border columns, then the right-hand side). The operator changes little
+    // between field solves and the restarted GMRES stops on ||M^-1 r|| <= rtol ||M^-1 b||,
+    // so starting from the previous solution saves iterations without changing the answer.
+    double[][] schur_warm;
     int hall_rowsum_reports = 0;
     int hall_phi_reports = 0;
     bool insulator_tensor = true;   // LMR_INSULATOR_BC, see the constructor

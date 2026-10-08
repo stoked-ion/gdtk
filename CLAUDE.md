@@ -165,6 +165,42 @@ Three separate traps, all of which bite together:
 - **The auto-CFL is frozen for the rest of the run.** `ResidualBasedAutoCFL` returns the current CFL unchanged while the *relative* residual exceeds the growth threshold, and the reference residuals are taken over the first ~10 steps, before the source exists. Afterwards the relative residual sits at 1e4–1e6 permanently. Set **`reset_reference_residuals = true`** on a `NewtonKrylovPhase` to re-take them — on the phase that begins *after* the ramp finishes, not where it starts (ten steps into a 600-step ramp captures 1.7% of the source and the relative residual plateaus near 500). Then restore the growth threshold to the default ~0.99, since the relative residual starts from 1 again. Note this also changes what `stop_on_relative_residual` means.
 - **Second-order reconstruction may not survive the transition.** The signature is `update_thermo_from_rhou` reporting negative internal energy. A first-order, working-CFL phase spanning the ramp and the relaxation after it is the fix; `extrema_clipping` does not help, and `thermo_interpolator = "pT"` removes the hard failure but not the underlying stiffness.
 
+#### Field continuation (`config.applied_B_scale_*`)
+
+A ramped *source* still meets the full-field Hall parameter of the undisturbed flow. In a
+generator that is the worst state: the Tokyo Tech channel's supersonic core sits at β ≈ 15–34
+before the interaction decelerates and densifies it to β ≈ 5–10. A source ramp from there
+(`VALID/tokyo/dev_R1`) ran away at an electrode edge (|∇φ| 78 MV/m) and the field GMRES failed
+100 steps in. `applied_B_scale_start = f0`, `applied_B_scale_ramp_start = n0`,
+`applied_B_scale_ramp_steps = n` scale the whole applied field by
+`f0 + (1-f0)*smoothstep((step-n0)/n)` (`updateAppliedBScale`, called wherever `SimState.step` is
+published). Every consumer goes through `appliedBzAt`/`appliedBVecAt`: field solve, Hall
+parameter, D source, UDF `Bz_applied`, snapshot `Bapp`. `n = 0` (the default) leaves the scale
+at exactly 1.0. Use it *instead of* `mhd_source_ramp_steps`, and hold the CFL through it.
+
+**Circuit solves are warm-started.** The Woodbury path does K+1 banded solves per field solve
+(15 for seven Faraday pairs), and each started from zero at `rtol` 1e-11. Each now starts from
+its own solution at the previous field solve (restarted GMRES only, whose test is relative to
+‖M⁻¹b‖). Measured on the Tokyo case: residual history identical to 6–8 digits, 7.6 → 5.2 s per
+Newton step.
+
+**A floating circuit measures the field discretisation's conservation.** With one stiff leg as
+the only path to ground, KCL makes the leg current (`legI` in the `[efield/circuit] state` line)
+equal to the net current the discrete operator fails to conserve. Supply legs (every established
+X2 circuit case) absorb it silently. Field-only test `E3D/ftest/gen_kcl.py` + `check_kcl.py`
+(three floating pairs, insulating ends, frozen flow), legI as a fraction of the summed load
+current:
+- rectangular cells, β = 0 or 4, either gate: ~1e-12 (exact);
+- 10° skewed cells, β = 0: ~1e-12 (the cross-diffusion split IS conservative);
+- 10° skewed cells, β = 4: 1.3 / 0.9 / 0.4 % (`legacy`) and 2.9 / 0.8 / 0.37 % (`none`) at
+  n = 8 / 16 / 32 — **first order, converging**.
+
+So the one non-conservative piece is the Hall part on NON-ORTHOGONAL cells: it sits on each
+cell's own gradient, exact per cell for uniform σ_H but not single-valued between the two cells
+of a skewed face. On the curved Tokyo channel (β 5–30, wall-cell aspect ratio ~40) it was ~10 %
+of the load current on the dev grid. A conservative and still uniform-σ_H-exact form (Parent's
+vertex flux generalised to skewed cells) is the fix; not implemented.
+
 #### Hall discretisation and the insulator boundary condition (`LMR_HALL_SCHEME`, `LMR_INSULATOR_BC`)
 
 Two environment switches select how the Hall (skew) part of the conductivity tensor is discretised. Both default to the historical behaviour, and every established result on this branch was produced with the defaults — a fresh converged `C6_pow` run under `central` with all of the below in place reproduces the stored golden F_x, F_y, Δu, I and η to 0.000%.
@@ -392,6 +428,47 @@ The Bond/Wheatley single-fluid model, ported from Eilmer 4 (README: "a work in p
 - **No `lmr` examples.** All MHD examples ship under Eilmer 4 (`examples/eilmer/2D/mhd-blunt-nose`, `MHDShockTube`, `mhd-kelvin-helmholtz`); none under `examples/lmr/`, so the lmr MHD path is essentially untested by the suite.
 - **Known bug:** `fluxcalc.d:149` writes the z-field divergence-cleaning flux into `F[cqi.xB]` instead of `F[cqi.zB]` (double-hits `xB`, never sets `zB`).
 - Setting `config.MHD=true` without compiling `MHD=1` throws at runtime: *"MHD capability has not been enabled"* (`globalconfig.d:2071`).
+
+#### Validation case: the Tokyo Tech seed-free argon generator (`Argon-ABLE/VALID/tokyo/`)
+
+The linear Faraday channel of Murakami/Tanaka/Okuno (JAP 2013, EEJ 2015, JPP 2015) and Komatsu
+(EEJ 2015, Hall/diagonal). `gen.py` builds it: the contour traced from JPP Fig. 1 (throat 10.0
+mm at x = 49.5 mm, exit 30.0, area ratio 3), seven pairs 8 mm @ 13 mm from x = 60 mm, the
+measured B(x) of Komatsu Fig. 2(b), a stagnation inflow at 9000 K / 0.105 MPa at the model's
+own Saha state, one `CircuitElectrode` node per electrode, Faraday/Hall/diag1/diag2
+connections. `restart.py` builds sweeps from a converged case; `compare.py` computes EER,
+per-pair V/I/P, T_e at pair 3, the potential across pair 4 and the ground-leg defect against
+`data/expdata.json` (every digitised point, with provenance). Figures:
+`PhD/solver-verification/figs/fig_tokyo.py`.
+
+- **Nozzle flow without the field is right:** 26.5 g/s, thermal input 131.5 kW (JPP 100–130),
+  exit Mach 2.78.
+- **Reaching the MHD operating point is the hard part.** JPP's state is a strongly decelerated
+  flow (core Mach ~1, T ~6000 K, n_e 2–3e21, β 5–10, T_e ≈ T + 1000 K). From the undisturbed
+  nozzle flow (Mach 2.6, n_e 6e20, β 15–34 at 4 T) five start-ups failed ~100 Newton steps
+  after switch-on, each at an electrode edge: a full-B source ramp (ideal electrode and 4e-5
+  Ω m² sheath); a B continuation from 5 % (through β ≈ 1, where σ/(1+β²) peaks: T_e 26 kK at
+  15 % of B, oblique ionisation streaks); a B continuation from 25 %; a decelerated initial
+  guess (ideal electrode: field GMRES stalls at 3e-7; sheath: CFL collapses); a β cap of 10.
+- **The failure counts Newton steps, not pseudo-time.** The same sheath + β-cap case ran away
+  at step ~460 / ~500 / ~500 with a held CFL of 0.2 / 2 / 10, although the pseudo-time step
+  differs 50-fold (2.8e-9 to 1.4e-7 s). That is an ITERATION instability. The field is solved
+  outside the complex-step Jacobian (it is real-valued), so each Newton step sees a frozen E;
+  within the step the fast electron energy equilibrates to a voltage-driven Joule heating
+  (and the D source even passes dJoule/dσ > 0 at frozen E into the Jacobian); the next field
+  solve redistributes the current. At electrode edges that Picard map has a gain above one.
+  `config.electric_field_relaxation = ω` (new, default 1) under-relaxes each field update,
+  φ ← ωφ_new + (1-ω)φ_old (and the circuit node potentials). **It does not help here:** ω = 0.3
+  ran away on schedule and ω = 0.1 earlier, so the field's current redistribution is the
+  stabilising part.
+- **Also tried and failed (all at step ~420–500):** a fully coupled Newton (field re-solved in
+  every Fréchet product via `use_real_valued_frechet_derivative = true`,
+  `frechet_derivative_perturbation = 1e-8`, freeze off: sooner, ~420), and treating the
+  metal-free stretches of electrode faces as insulators (slope row + gate). The latter raised
+  the KCL defect on 10° cells at β = 4 from 0.4–1.3 % to 15–36 % and was withdrawn, not committed.
+- **Status (2026-10-09):** case, data and comparison scripts complete; operating point not
+  reached in ten strategies. Next: a time-accurate start (as JPP and the experiment), and a
+  conservative skewed-cell Hall flux (the one known defect at the electrode edges).
 
 #### Which electrode connection to use
 

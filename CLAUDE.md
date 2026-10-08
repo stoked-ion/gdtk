@@ -466,6 +466,15 @@ per-pair V/I/P, T_e at pair 3, the potential across pair 4 and the ground-leg de
   `frechet_derivative_perturbation = 1e-8`, freeze off: sooner, ~420), and treating the
   metal-free stretches of electrode faces as insulators (slope row + gate). The latter raised
   the KCL defect on 10° cells at β = 4 from 0.4–1.3 % to 15–36 % and was withdrawn, not committed.
+- **Without the field solver** (`gen.py --udfK K --udfmodel seg|cont`, `udf-loadfactor.lua`,
+  `compare_udf.py`: prescribed loading factor E_y = K u B in a UDF). Ideal segmentation
+  (J_x = 0, no Hall loss) goes to NaN within 100 steps: σ undiminished at β 15–34 gives an
+  interaction parameter ~80. Continuous electrodes (E_x = 0, σ/(1+β²)) run cleanly through the
+  full source but extract only 1.2 % (K 0.8) / 2.0 % (K 0.5, ~20 Ω per pair) against 12.9 %
+  measured. So the gas, kinetics and Joule coupling are robust once the Hall physics limits the
+  current, the runaways belong to the segmented-electrode field solve, and the answer lies
+  between two limits that differ by more than an order of magnitude: segmentation (the field
+  solve) is the physics, not a detail.
 - **Status (2026-10-09):** case, data and comparison scripts complete; operating point not
   reached in ten strategies. Next: a time-accurate start (as JPP and the experiment), and a
   conservative skewed-cell Hall flux (the one known defect at the electrode edges).

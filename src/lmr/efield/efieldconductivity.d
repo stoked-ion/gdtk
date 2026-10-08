@@ -62,6 +62,11 @@ class ConstantTensorConductivity : ConductivityModel{
 */
     this() {}
     @nogc final number opCall(ref const(GasState) gs, const Vector3 pos, GasModel gm){
+        // optional smooth onset along x (verification: a source that starts smoothly inside the
+        // domain, so a flow solver's inflow closure does not set the measured order)
+        immutable double len = GlobalConfig.electric_field_test_sigma_len;
+        if (len > 0.0)
+            return to!number(GlobalConfig.electric_field_test_sigma*0.5*(1.0 + tanh((pos.x.re - GlobalConfig.electric_field_test_sigma_x0)/len)));
         return to!number(GlobalConfig.electric_field_test_sigma);
     }
     @nogc final double hall_beta(ref const(GasState) gs, GasModel gm, double Bz){

@@ -190,11 +190,19 @@ Under the split, two boundary treatments that were adequate for the scalar path 
 
 #### The 3-D (dimension-generic) field solve
 
-The 2-D solver is a 5-band, 4-face, closed-form (Maxima) assembly. In 3-D, and in 2-D on
-request (`LMR_EFIELD_GENERIC=1`, for cross-checking), `efield.d` uses `assemble_generic`
-instead. It is the same **central** scheme written once for any face count, plus what a
-field misaligned with the grid needs. The upwind (Path 2) Hall scheme is 2-D only and is
-refused in 3-D.
+`efield.d` has two assemblies. **Since 2026-10-08 the generic one (`assemble_generic`) is the
+default in 2-D as well as 3-D.** It is the established **central** scheme written once for any
+face count, plus what a skewed grid or a field misaligned with the grid needs.
+
+The original 5-band, 4-face closed-form (Maxima) 2-D assembly is kept for two things only it
+does, and is selected automatically for them:
+- the upwind (Path 2) Hall scheme (`LMR_HALL_SCHEME=upwind`);
+- the in-plane field mode (`applied_B_direction = "y"`).
+
+`LMR_EFIELD_GENERIC=0` forces the closed-form path. It does not converge on non-orthogonal
+cells (see below) and prints the grid's maximum face non-orthogonality, with a warning above
+1 deg. On orthogonal grids the two agree to round-off: condition 6, 250 V gives F_x +76.4578528387
+(generic) vs +76.4578528383 (closed-form) N/m. The upwind scheme is refused in 3-D.
 
 - **Gradient reconstruction** (`efieldstencil.d`): the closed forms are the solution of a
   square fit, phi_j - phi_k = g.d_j + sum_a h_a d_ja^2 (the interior `R_*` family). An
@@ -225,9 +233,10 @@ refused in 3-D.
   On orthogonal grids none of this changes anything: every earlier test reproduces to all
   digits.
 - **`config.electric_field_hall_gate`:**
-  - `legacy` (default): the 2-D central gate exactly. Boundary and wall-layer faces get the
-    unmagnetised sigma, insulating walls get dphi/dn = 0, and electrode phantoms are a
-    mirror. A wall normal to B (a 3-D side wall) is not gated.
+  - `legacy` (default): the 2-D central gate. Boundary and wall-layer faces get the
+    unmagnetised sigma, and insulating walls get dphi/dn = 0. Electrode phantoms use the
+    true opposite face (see the fixed phantom bug below). A wall normal to B (a 3-D side
+    wall) is not gated.
     - Where B = 0 at the wall face (e.g. a clipped table), the field at the cell centre
       decides, and with no field there the cell is not gated.
     - Before this rule, such cells were gated on their other faces too. At the edge of a
@@ -275,9 +284,24 @@ refused in 3-D.
     correct in 3-D because the tensor only flips b-hat.
 
 Verification (`Argon-ABLE/E3D/`, `E3D/ftest/`):
-- **2-D:** the generic path reproduces the 2-D path through a whole coupled NK run (F_x
-  +73.8064246223 N/m, condition 6, 250 V) to 6e-13, and the shipped 2-D field example to
-  its recorded RMS.
+- **2-D:** the generic path reproduces the closed-form 2-D path through a whole coupled NK
+  run to 6e-13 (before the phantom fix: +73.8064246223 N/m, condition 6, 250 V; after it:
+  +76.4578528387 vs +76.4578528383). It also reproduces the shipped 2-D field example to its
+  recorded RMS.
+- **Coupled flow + field + D source, exact solution** (`VERIF/f1d/`): an inviscid Faraday
+  accelerator (ideal argon, constant sigma, beta = 0, continuous electrodes) is exactly
+  quasi-1-D.
+  - The solver is y-uniform to 1e-12, and E_y is exact to 1e-11.
+  - The D source + field solve reproduce a Lua source of the same J = sigma(E - uB) to every
+    digit.
+  - With the conductivity switched on smoothly inside the domain
+    (`electric_field_test_sigma_x0/_len`, a constant_tensor verification option), the error
+    away from the outflow converges at 3.2/3.0/2.2.
+  - Two FLOW-SOLVER boundary closures are first order: an abrupt source at a supersonic
+    inflow (an O(h) offset set in the first cell and carried downstream), and the
+    copy-extrapolated outflow cell (alternating, decaying within a few cells upstream).
+  - Real-valued binaries are useless with `frechet_derivative_perturbation = 1e-30` (it
+    needs the complex lmrZ build).
 - **Extrusion:** the 3-D extrusion of that coupled case (8 MPI ranks) gives the same F_x
   per metre of depth to 2.5e-10.
 - **Rotation:** a 90 deg rotation about x (electrodes on the z-walls, B along -y) gives the
@@ -299,25 +323,43 @@ Verification (`Argon-ABLE/E3D/`, `E3D/ftest/`):
   - The first coupled 3-D run on the new rig grew a 100 V potential mode along B near the
     diverging walls (19 MW/m of Joule heat, Te to the 500 kK clamp) from exactly this.
 
-**Latent 2-D defect, not fixed: the 2-D path is inconsistent on non-orthogonal cells.**
-On a skewed quadrilateral (`ex2dsk*`), phi = exp(x) sin y for uniform sigma:
+**FIXED 2026-10-08: the closed-form 2-D path is inconsistent on non-orthogonal cells.**
+The fix is that the generic assembly is now the 2-D default. On a skewed quadrilateral
+(`ex2dsk*`), phi = exp(x) sin y for uniform sigma, the closed-form path gives:
 - isotropic: RMS 8.9e-3 -> 8.4e-3 -> 8.3e-3 from 8^2 to 32^2 (no convergence);
 - beta = 4: the gradient error reaches 230%.
-The generic path (`LMR_EFIELD_GENERIC=1`) converges at second order on the same grids
-(1.91/1.97; with Hall and no gate the same numbers, since a uniform Hall term then
-contributes exactly zero per cell).
+The generic path converges at second order on the same grids (1.91/1.97). With Hall and no
+gate it gives the same numbers, since a uniform Hall term then contributes exactly zero per
+cell. With the production `legacy` gate the Hall case is first order (the gate's beta = 0 wall
+layer is not in the uniform-beta exact solution).
+
+What the defect cost, measured: the 2-D new-rig case (linear sheath, 150 V, beta cap 10)
+moved 0.013% in F_x. Its electrodes sit in the rectangular block, and the skewed expansion
+carries little current in 2-D.
 - Unaffected (scanned every prepped case, 2026-10-08): every rectangular grid, whatever
   the clustering. That is X2-PFE (condition 6), the gap studies, C1/C2, CONSTE, FROZENE,
   NARROW, the Hall studies and the air cases.
-- Affected: grids with skewed cells. These are GEOM-MODES (the new rig, 12 deg in its
-  diverging section x > 200 mm, 70 cases), SIMPLE/h_dio_* and X2-SHIM/SHORT.
+- Affected before the fix: grids with skewed cells. These are GEOM-MODES (the new rig,
+  12 deg in its diverging section x > 200 mm, 70 cases), SIMPLE/h_dio_* and X2-SHIM/SHORT.
 
-**Latent 2-D bug, not fixed:** lmr's face order is west, east, south, north (bottom, top),
-the `Face` enum, so the 2-D phantom-point pairing `(j+2)%4` picks a PERPENDICULAR face.
-The electrode phantom is therefore a mirror, not the linear extrapolation its comments
-describe. The 2-D N/E/S/W names in the derivative families are only labels and are
-harmless. With the correct pairing, condition 6 at 250 V gains 3.6% in F_x. `legacy`
-reproduces the mirror on purpose; `rotation` and `none` use the correct pairing.
+**FIXED 2026-10-08: the electrode phantom pairing.** lmr's face order is west, east, south,
+north (bottom, top), the `Face` enum. The 2-D phantom-point pairing `(j+2)%4` therefore
+picked a PERPENDICULAR face, so the phantom was a mirror rather than the linear
+extrapolation its comments describe.
+- It now pairs with `j^1` in both 2-D sites (matrix and reported field), and every gate
+  mode uses the true opposite.
+- The 2-D N/E/S/W names in the derivative families are only labels and were harmless.
+- Effect: condition 6 at 250 V goes from F_x +73.8064246223 to +76.4578528387 N/m (+3.59%).
+  The 3-D extrusion matches the new value per metre to 1.5e-10.
+- **Every established 2-D number with electrodes predates this fix.**
+- Exact-solution test (`E3D/ftest/gen_sheath.py`, linear sheaths). Before the fix, the
+  field REPORTED in the cell row touching each electrode, which the MHD source uses, was 66%
+  wrong at every resolution (71% on a clustered grid). After it is 4.9% -> 2.1%, converging.
+  The solved potential and current were unaffected at beta = 0 on a rectangular grid.
+- The current converges at FIRST order: the sheath stamp evaluates dV with the cell-centre
+  potential, half a cell from the wall. On the condition-6 grid that half-cell drop is 0.64 V
+  of a ~34 V sheath voltage (1.9%), so roughly 2-3% in electrode current. This is an accuracy
+  limit, not a bug.
 
 ### 3. Built-in single-fluid MHD (`version(MHD)`, default on via `MHD ?= 1`) — present but rough in lmr
 

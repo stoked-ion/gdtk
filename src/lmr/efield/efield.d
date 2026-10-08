@@ -47,7 +47,22 @@ class ElectricField {
         nf = 2*nd;
         nbands = nf + 1;
         dband = diagBand(nf);
-        generic = (nd == 3) || (environment.get("LMR_EFIELD_GENERIC", "0") == "1");
+        // Which assembly. The dimension-generic one is the default in 2-D too (since
+        // 2026-10-08): the closed-form 2-D assembly applies each face's non-orthogonal
+        // remainder to the owning cell's gradient, which cancels between opposite faces, so
+        // it does not converge on skewed cells (harmonic field on a skewed quad: RMS 8.9e-3 ->
+        // 8.3e-3 from 8^2 to 32^2; gradient error 230% at beta = 4). On orthogonal grids the
+        // two agree to round-off. The closed-form path remains for what only it does -- the
+        // upwind Hall scheme (LMR_HALL_SCHEME=upwind) and the in-plane field mode
+        // (applied_B_direction = "y") -- and on request with LMR_EFIELD_GENERIC=0.
+        {
+            immutable bool upwind_req = (environment.get("LMR_HALL_SCHEME", "central") == "upwind");
+            immutable string gen_env = environment.get("LMR_EFIELD_GENERIC", "");
+            if (nd == 3)              generic = true;
+            else if (gen_env == "1")  generic = true;
+            else if (gen_env == "0")  generic = false;
+            else                      generic = !upwind_req && GlobalConfig.applied_B_direction != "y";
+        }
         {
             string g = GlobalConfig.electric_field_hall_gate;
             if (g == "legacy") gate_mode = GATE_LEGACY;
@@ -129,6 +144,36 @@ class ElectricField {
         if (GlobalConfig.is_master_task && generic)
             writefln("  [efield] dimension-generic assembly, %d-D, %d bands, Hall gate %s, cross-diffusion %s",
                      nd, nbands, GlobalConfig.electric_field_hall_gate, cross_terms ? "on" : "off");
+        if (!generic) {
+            // The closed-form 2-D assembly is inconsistent on non-orthogonal cells: say so when
+            // the grid has any. Non-orthogonality of an interior face = the angle between its
+            // normal and the line joining the two cell centres.
+            double worst = 0.0;
+            foreach (block; localFluidBlocks) {
+                foreach (cell; block.cells) {
+                    foreach (io, face; cell.iface) {
+                        if (face.is_on_boundary) continue;
+                        auto other = (face.left_cell is cell) ? face.right_cell : face.left_cell;
+                        double ex = other.pos[0].x.re - cell.pos[0].x.re, ey = other.pos[0].y.re - cell.pos[0].y.re;
+                        double em = sqrt(ex*ex + ey*ey);
+                        if (em == 0.0) continue;
+                        double c = fabs(ex*face.n.x.re + ey*face.n.y.re)/em;
+                        double ang = acos(fmin(c, 1.0))*180.0/PI;
+                        if (ang > worst) worst = ang;
+                    }
+                }
+            }
+            version(mpi_parallel) {
+                MPI_Allreduce(MPI_IN_PLACE, &worst, 1, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
+            }
+            if (GlobalConfig.is_master_task) {
+                writefln("  [efield] closed-form 2-D assembly (max face non-orthogonality %.2f deg)", worst);
+                if (worst > 1.0)
+                    writefln("  [efield] WARNING: the closed-form 2-D assembly does not converge on non-orthogonal\n"
+                             ~ "           cells (here up to %.1f deg). Use the default (generic) assembly unless\n"
+                             ~ "           this case needs the upwind Hall scheme or the in-plane field mode.", worst);
+            }
+        }
         if (GlobalConfig.is_master_task)
             writefln("  [efield/hall] scheme = %s", hall_scheme_central ? "central (original)" : "upwind (Path 2)");
             if (!hall_scheme_central) {
@@ -1080,7 +1125,10 @@ class ElectricField {
                                 // which restores exactness on constant AND linear fields.
                                 double w = S/D*(sfacx*fdx[jo] + sfacy*fdy[jo]);
                                 if (w != 0.0) {
-                                    size_t jopp = (jo+2)%4;
+                                    // the OPPOSITE face: lmr's order is west, east, south,
+                                    // north, so it is jo^1. This was (jo+2)%4, a perpendicular
+                                    // face, which on an orthogonal grid gives t = 0 (a mirror).
+                                    size_t jopp = jo ^ 1;
                                     auto oface = cell.iface[jopp];
                                     bool opp_ok = !oface.is_on_boundary
                                         || field_bcs[blkid][oface.bc_id].isShared;
@@ -1503,7 +1551,7 @@ class ElectricField {
                     auto fbc = field_bcs[blkid][face.bc_id];
                     if (((cast(SheathField) fbc) is null)
                         && ((cast(CircuitElectrode) fbc) is null)) continue;
-                    size_t iopp = (io+2)%4;
+                    size_t iopp = io ^ 1;   // the opposite face (was (io+2)%4, a perpendicular one)
                     auto oface = cell.iface[iopp];
                     bool opp_ok = !oface.is_on_boundary
                         || field_bcs[blkid][oface.bc_id].isShared;
@@ -1865,13 +1913,11 @@ class ElectricField {
         foreach (j; 0 .. nf) {
             tex[j] = 0.0; jop[j] = oppositeFace(j);
             if (kind[j] != FK_SHEATH && kind[j] != FK_CIRCUIT) continue;
-            // 'legacy': the MIRROR (t = 0). The 2-D code pairs face j with (j+2)%4, which in
-            // lmr's face order is a perpendicular face, so on an orthogonal grid its t is
-            // exactly 0 -- a mirror, not the linear extrapolation its comments describe.
-            // Using t = 0 here reproduces it on rectangular grids in ANY orientation (the
-            // pairing itself is not rotation-invariant: measured, it changes F_x by 3.6% at
-            // condition 6, 250 V, between a duct and the same duct rotated about x).
-            if (gate_mode == GATE_LEGACY) continue;
+            // Every gate mode uses the true opposite face. (Until 2026-10-08 the 2-D path
+            // paired face j with (j+2)%4, a PERPENDICULAR face in lmr's west-east-south-north
+            // order, so its phantom was a mirror, t = 0; 'legacy' copied the mirror. The
+            // mirror is not rotation-invariant: it changed F_x by 3.6% at condition 6, 250 V,
+            // between a duct and the same duct rotated about x.)
             int o = jop[j];
             if (kind[o] != FK_INTERIOR && kind[o] != FK_SHARED) continue;
             double dd = d[o][0]^^2 + d[o][1]^^2 + d[o][2]^^2;

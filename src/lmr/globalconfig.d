@@ -1333,6 +1333,9 @@ final class GlobalConfig {
     // parameter (sign of the local B), so the 3-D tensor operator can be checked against
     // exact solutions. Not a physical model.
     shared static double electric_field_test_sigma = 1.0;
+    // constant_tensor only: a smooth onset sigma(x) = sigma 0.5 (1 + tanh((x - x0)/len)) when len > 0
+    shared static double electric_field_test_sigma_x0 = 0.0;
+    shared static double electric_field_test_sigma_len = 0.0;
     shared static double electric_field_test_beta = 0.0;
     // Generic (3-D) field solve: the Hall gate on boundary and wall-layer faces --
     // "legacy" (the 2-D central scheme: unmagnetised sigma there, dphi/dn = 0 walls),
@@ -2245,6 +2248,8 @@ void set_config_for_core(JSONValue jsonData)
     mixin(update_int("electric_field_stop_step", "electric_field_stop_step"));
     mixin(update_double("electric_field_hall_beta_max", "electric_field_hall_beta_max"));
     mixin(update_double("electric_field_test_sigma", "electric_field_test_sigma"));
+    mixin(update_double("electric_field_test_sigma_x0", "electric_field_test_sigma_x0"));
+    mixin(update_double("electric_field_test_sigma_len", "electric_field_test_sigma_len"));
     mixin(update_double("electric_field_test_beta", "electric_field_test_beta"));
     mixin(update_string("electric_field_hall_gate", "electric_field_hall_gate"));
     mixin(update_bool("electric_field_cross_terms", "electric_field_cross_terms"));

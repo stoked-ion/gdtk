@@ -1427,6 +1427,11 @@ class ElectricField {
             foreach (i; 0 .. N) phi[i] = phisol[i];
             // Every rank solved the same tiny K x K system redundantly, so all ranks
             // now hold identical q. Store it for the next solve's Velectrode_at().
+            if (GlobalConfig.electric_field_relaxation < 1.0 && circuit_solve_count > 0) {
+                immutable double w = GlobalConfig.electric_field_relaxation;
+                auto qold = circuit.q;
+                foreach (m; 0 .. K) qsol[m] = w*qsol[m] + (1.0 - w)*qold[m];
+            }
             circuit.setQ(qsol);
             // Diagnostic on the first few solves: a circuit that is mis-assembled
             // usually shows up here as q far from the nominal node voltages, long
@@ -1467,10 +1472,21 @@ class ElectricField {
             }
         }
 
-        // Unpack the solution into the "electric_potential" members stored in the cells
+        // Under-relaxation of the field update (config.electric_field_relaxation = omega < 1):
+        // phi <- omega phi_new + (1 - omega) phi_old. The Newton solver sees the field frozen
+        // (it is solved outside the complex-step Jacobian), so flow and field are coupled by a
+        // Picard iteration. Where the fast electron energy equilibrates to a voltage-driven
+        // Joule heating each step and the next field solve redistributes the current, that
+        // iteration can have a gain above one at electrode edges: it then diverges after a
+        // fixed number of steps whatever the CFL. Relaxation damps a gain lambda to
+        // 1 - omega + omega lambda and leaves the converged field unchanged. omega = 1 (the
+        // default) is the original update; the first solve (no previous field) is never relaxed.
+        immutable double omega = GlobalConfig.electric_field_relaxation;
         size_t i = 0;
         foreach(block; localFluidBlocks){
             foreach(cell; block.cells){
+                double old = cell.electric_potential;
+                if (omega < 1.0 && !isNaN(old)) phi[i] = omega*phi[i] + (1.0 - omega)*old;
                 cell.electric_potential = phi[i];
                 i += 1;
             }
